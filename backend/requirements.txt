@@ -1,0 +1,21 @@
+# --- Core Frameworks ---
+fastapi>=0.115.0
+uvicorn>=0.32.0
+pydantic>=2.10.0
+python-dotenv>=1.0.1
+
+# --- AI & Agents ---
+langchain>=0.3.0
+langchain-openai>=0.2.0
+langgraph>=0.2.0
+langchain-community>=0.3.0
+
+# --- Tools & Scraping (Real Data) ---
+duckduckgo-search>=6.0.0
+beautifulsoup4>=4.12.3
+feedparser>=6.0.10
+requests>=2.32.0
+mcp>=1.0.0  # Model Context Protocol SDK
+
+# --- Database ---
+# SQLite is built-in
