@@ -1,0 +1,31 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.venv/
+env/
+
+# --- Environment Variables (CRITICAL) ---
+.env
+.env.local
+
+# --- Database ---
+*.db
+*.sqlite3
+*.sqlite
+
+# --- IDE Settings ---
+.vscode/
+.idea/
+
+# --- OS Junk ---
+.DS_Store
+Thumbs.db
+
+# --- Node/Frontend ---
+node_modules/
+.next/
+out/
+build/
+dist/
