@@ -7,10 +7,10 @@ from database import log_agent_step
 
 app = FastAPI(title="Fresh Prints OS Brain")
 
-# 1. Enable CORS (So Next.js on localhost:3000 can talk to Python)
+# 1. Enable CORS (So Next.js on localhost:3000 or 3001 can talk to Python)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],  # Allow your Frontend
+    allow_origins=["http://localhost:3000", "http://localhost:3001"],  # Allow your Frontend
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -62,14 +62,28 @@ async def get_pending_draft(lead_id: int):
         # Dig into the last message to find the tool call
         last_message = state.values["messages"][-1]
         
-        # Check if the agent is trying to call a tool
-        if hasattr(last_message, 'additional_kwargs') and "tool_calls" in last_message.additional_kwargs:
+        # Try to get tool_calls from either location (newer LangChain uses direct attribute)
+        tool_calls = []
+        if hasattr(last_message, 'tool_calls') and last_message.tool_calls:
+            tool_calls = last_message.tool_calls
+        elif hasattr(last_message, 'additional_kwargs') and "tool_calls" in last_message.additional_kwargs:
             tool_calls = last_message.additional_kwargs['tool_calls']
-            if tool_calls:
-                # Extract arguments safely
-                raw_args = tool_calls[0]['function']['arguments']
+        
+        if tool_calls:
+            # Handle both dict format (additional_kwargs) and object format (tool_calls attr)
+            first_call = tool_calls[0]
+            if isinstance(first_call, dict):
+                tool_name = first_call.get('function', {}).get('name') or first_call.get('name', '')
+                raw_args = first_call.get('function', {}).get('arguments') or json.dumps(first_call.get('args', {}))
+            else:
+                # Object format
+                tool_name = getattr(first_call, 'name', '')
+                raw_args = json.dumps(getattr(first_call, 'args', {}))
+            
+            # Check if it's the save_lead_strategy tool (the one requiring approval)
+            if tool_name == "save_lead_strategy":
                 try:
-                    args = json.loads(raw_args) # <--- SAFER than eval()
+                    args = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
                     return {
                         "status": "waiting_for_approval",
                         "pending_draft": args.get('email_draft'),

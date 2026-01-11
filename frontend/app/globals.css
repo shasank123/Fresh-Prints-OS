@@ -1,0 +1,12 @@
+@import "tailwindcss";
+@config "../tailwind.config.ts";
+
+:root {
+    background-color: #0a192f;
+    color: #e6f1ff;
+}
+
+/* Custom Scrollbar for Terminal */
+.scrollbar-hide::-webkit-scrollbar {
+    display: none;
+}
