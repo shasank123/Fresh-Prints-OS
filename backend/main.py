@@ -3,7 +3,11 @@ from fastapi import FastAPI, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware 
 from pydantic import BaseModel
 from agents.scout_agent import run_dynamic_scout, agent_executor
+from agents.designer_agent import run_designer_agent, agent_executor as designer_executor
 from database import log_agent_step
+
+# Track active thread per lead (for rejection flow)
+lead_thread_map: dict[int, str] = {}
 
 app = FastAPI(title="Fresh Prints OS Brain")
 
@@ -116,6 +120,111 @@ async def approve_lead(lead_id: int):
     log_agent_step(lead_id, "SYSTEM", "✅ Draft Saved to CRM after Human Approval.")
     
     return {"status": "Agent Resumed and Finished"}
+
+class DesignPayload(BaseModel):
+    lead_id: int
+    vibe: str
+
+# 1. TRIGGER
+@app.post("/run-designer")
+async def trigger_designer(payload: DesignPayload, background_tasks: BackgroundTasks):
+    import asyncio
+    
+    # Track thread for this lead (initial run uses lead_id as thread)
+    lead_thread_map[payload.lead_id] = str(payload.lead_id)
+    
+    def run_async_agent(lead_id, vibe):
+        """Wrapper to run async agent in background thread"""
+        asyncio.run(run_designer_agent(lead_id, vibe))
+    
+    background_tasks.add_task(run_async_agent, payload.lead_id, payload.vibe)
+    return {"status": "Designer Started"}
+
+# 2. GET PENDING DESIGN (For UI)
+@app.get("/design-pending-review/{lead_id}")
+async def get_pending_design(lead_id: int):
+    # Use the tracked thread (handles rejection with new thread)
+    thread_id = lead_thread_map.get(lead_id, str(lead_id))
+    config = {"configurable": {"thread_id": thread_id}}
+    state = designer_executor.get_state(config)
+    
+    if state.next:
+        last_message = state.values["messages"][-1]
+        
+        # Try to get tool_calls from either location
+        tool_calls = []
+        if hasattr(last_message, 'tool_calls') and last_message.tool_calls:
+            tool_calls = last_message.tool_calls
+        elif hasattr(last_message, 'additional_kwargs') and "tool_calls" in last_message.additional_kwargs:
+            tool_calls = last_message.additional_kwargs['tool_calls']
+        
+        if tool_calls:
+            first_call = tool_calls[0]
+            # Handle both dict and object formats
+            if isinstance(first_call, dict):
+                tool_name = first_call.get('function', {}).get('name') or first_call.get('name', '')
+                raw_args = first_call.get('function', {}).get('arguments') or json.dumps(first_call.get('args', {}))
+            else:
+                tool_name = getattr(first_call, 'name', '')
+                raw_args = json.dumps(getattr(first_call, 'args', {}))
+            
+            if tool_name == "save_final_design":
+                try:
+                    args = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
+                    return {
+                        "status": "waiting_for_approval",
+                        "image_url": args.get('image_url'),
+                        "cost_report": args.get('cost_report')
+                    }
+                except json.JSONDecodeError:
+                    return {"status": "error", "detail": "Could not parse arguments"}
+                    
+    return {"status": "no_pending_action"}
+
+# 3. REJECT (Feedback Loop)
+class RejectionPayload(BaseModel):
+    feedback: str
+
+@app.post("/reject-design/{lead_id}")
+async def reject_design(lead_id: int, payload: RejectionPayload, background_tasks: BackgroundTasks):
+    """
+    User hates the design. We inject the feedback and restart the agent.
+    """
+    import asyncio
+    import time
+    
+    # Generate new thread ID for this rejection attempt
+    new_thread_id = f"{lead_id}_v{int(time.time())}"
+    lead_thread_map[lead_id] = new_thread_id
+    
+    print(f"X Design Rejected for {lead_id}: {payload.feedback} -> New Thread: {new_thread_id}")
+    
+    def run_async_agent_with_feedback(lead_id, feedback, thread_id):
+        """Wrapper to run async agent with feedback in background thread"""
+        asyncio.run(run_designer_agent(lead_id, "", feedback, thread_id))
+    
+    background_tasks.add_task(run_async_agent_with_feedback, lead_id, payload.feedback, new_thread_id)
+    
+    return {"status": "Feedback sent to Agent. Regenerating..."}
+
+# 4. APPROVE
+@app.post("/approve-design/{lead_id}")
+async def approve_design(lead_id: int):
+    """
+    User loves it. Resume the 'save_final_design' tool call.
+    """
+    print(f"✅ Design Approved for {lead_id}")
+    config = {"configurable": {"thread_id": str(lead_id)}}
+    
+    async for event in designer_executor.astream(None, config=config):
+        for node, values in event.items():
+            if "messages" in values:
+                last_msg = values["messages"][-1]
+                if last_msg.type == "tool":
+                     log_agent_step(lead_id, "TOOL_RESULT", f"Output: {last_msg.content}")
+
+    log_agent_step(lead_id, "SYSTEM", "✅ Final Design Saved to Database.")
+    return {"status": "Design Saved"}
 
 if __name__ == "__main__":
     import uvicorn
