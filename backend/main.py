@@ -4,6 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from agents.scout_agent import run_dynamic_scout, agent_executor
 from agents.designer_agent import run_designer_agent, agent_executor as designer_executor
+from agents.logistics_agent import run_logistics_agent, run_logistics_agent_with_feedback, agent_executor as logistics_executor
 from database import log_agent_step
 
 # Track active thread per lead (for rejection flow)
@@ -225,6 +226,195 @@ async def approve_design(lead_id: int):
 
     log_agent_step(lead_id, "SYSTEM", "✅ Final Design Saved to Database.")
     return {"status": "Design Saved"}
+
+# 1. TRIGGER
+class LogisticsPayload(BaseModel):
+    lead_id: int
+    customer_zip: str
+    order_qty: int
+    sku: str
+
+@app.post("/run-logistics")
+async def trigger_logistics(payload: LogisticsPayload, background_tasks: BackgroundTasks):
+    import asyncio
+    
+    # Track thread for this lead (initial run uses lead_id as thread)
+    logistics_thread_map[payload.lead_id] = str(payload.lead_id)
+    
+    def run_async_agent(lead_id, customer_zip, order_qty, sku):
+        """Wrapper to run async agent in background thread"""
+        asyncio.run(run_logistics_agent(lead_id, customer_zip, order_qty, sku))
+    
+    background_tasks.add_task(
+        run_async_agent, 
+        payload.lead_id, 
+        payload.customer_zip, 
+        payload.order_qty, 
+        payload.sku
+    )
+    return {"status": "Logistics Agent Started"}
+
+# Track active thread per logistics lead (for rejection flow)
+logistics_thread_map: dict[int, str] = {}
+
+# 2. REVIEW PENDING PLAN (The HITL Modal)
+@app.get("/logistics-pending-plan/{lead_id}")
+async def get_logistics_plan(lead_id: int):
+    # Use the tracked thread (handles rejection with new thread)
+    thread_id = logistics_thread_map.get(lead_id, str(lead_id))
+    config = {"configurable": {"thread_id": thread_id}}
+    state = logistics_executor.get_state(config)
+    
+    if state.next:
+        last_message = state.values["messages"][-1]
+        
+        # Try to get tool_calls from either location (dual-check pattern)
+        tool_calls = []
+        if hasattr(last_message, 'tool_calls') and last_message.tool_calls:
+            tool_calls = last_message.tool_calls
+        elif hasattr(last_message, 'additional_kwargs') and "tool_calls" in last_message.additional_kwargs:
+            tool_calls = last_message.additional_kwargs['tool_calls']
+        
+        if tool_calls:
+            first_call = tool_calls[0]
+            # Handle both dict format (additional_kwargs) and object format (tool_calls attr)
+            if isinstance(first_call, dict):
+                tool_name = first_call.get('function', {}).get('name') or first_call.get('name', '')
+                raw_args = first_call.get('function', {}).get('arguments') or json.dumps(first_call.get('args', {}))
+            else:
+                # Object format
+                tool_name = getattr(first_call, 'name', '')
+                raw_args = json.dumps(getattr(first_call, 'args', {}))
+            
+            # Only pause for the final save_logistics_plan tool
+            if tool_name == "save_logistics_plan":
+                try:
+                    args = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
+                    return {
+                        "status": "waiting_for_approval",
+                        "plan_details": args.get('plan_details'),
+                        "total_cost": args.get('total_cost')
+                    }
+                except json.JSONDecodeError:
+                    return {"status": "error", "detail": "Could not parse arguments"}
+            else:
+                # AUTO-RESUME: For non-save tools, continue the agent automatically
+                # This allows the agent to run through all analysis steps without user intervention
+                print(f"🔄 Auto-resuming logistics agent for tool: {tool_name}")
+                try:
+                    async for event in logistics_executor.astream(None, config=config):
+                        for node, values in event.items():
+                            if "messages" in values:
+                                last_msg = values["messages"][-1]
+                                if last_msg.type == "tool":
+                                    log_agent_step(lead_id, "TOOL_RESULT", f"{tool_name}: {last_msg.content[:200]}...")
+                except Exception as e:
+                    print(f"Auto-resume error: {e}")
+                
+                # Return processing status - frontend will poll again
+                return {"status": "processing"}
+                    
+    return {"status": "no_pending_action"}
+
+# 3. APPROVE PLAN
+@app.post("/approve-logistics/{lead_id}")
+async def approve_logistics(lead_id: int):
+    print(f"✅ Logistics Plan Approved for {lead_id}")
+    # Use tracked thread for consistency
+    thread_id = logistics_thread_map.get(lead_id, str(lead_id))
+    config = {"configurable": {"thread_id": thread_id}}
+    
+    async for event in logistics_executor.astream(None, config=config):
+        for node, values in event.items():
+            if "messages" in values:
+                last_msg = values["messages"][-1]
+                if last_msg.type == "tool":
+                     log_agent_step(lead_id, "TOOL_RESULT", f"Output: {last_msg.content}")
+
+    log_agent_step(lead_id, "SYSTEM", "✅ Order Routed & Saved.")
+    return {"status": "Plan Executed"}
+
+# 4. REJECT PLAN (Feedback Loop)
+class LogisticsRejectionPayload(BaseModel):
+    feedback: str
+
+@app.post("/reject-logistics/{lead_id}")
+async def reject_logistics(lead_id: int, payload: LogisticsRejectionPayload, background_tasks: BackgroundTasks):
+    """
+    User rejects the logistics plan. We inject the feedback and restart the agent.
+    """
+    import asyncio
+    import time
+    
+    # Generate new thread ID for this rejection attempt
+    new_thread_id = f"{lead_id}_logistics_v{int(time.time())}"
+    logistics_thread_map[lead_id] = new_thread_id
+    
+    print(f"❌ Logistics Plan Rejected for {lead_id}: {payload.feedback} -> New Thread: {new_thread_id}")
+    log_agent_step(lead_id, "SYSTEM", f"❌ Plan Rejected. Feedback: {payload.feedback}")
+    
+    def run_async_agent_with_feedback(lead_id, feedback, thread_id):
+        """Wrapper to run async agent with feedback in background thread"""
+        asyncio.run(run_logistics_agent_with_feedback(lead_id, feedback, thread_id))
+    
+    background_tasks.add_task(run_async_agent_with_feedback, lead_id, payload.feedback, new_thread_id)
+    
+    return {"status": "Feedback sent to Agent. Regenerating plan..."}
+
+# ==========================================
+# 🗺️ ADVANCED LOGISTICS ENDPOINTS
+# ==========================================
+
+# Import the helper functions
+from mcp_server import get_route_data, get_live_shipping_rates, calculate_carbon_footprint
+
+class RouteDataPayload(BaseModel):
+    customer_zip: str
+    active_warehouses: list[str] | None = None
+
+@app.post("/logistics-route-data")
+async def get_logistics_route_data(payload: RouteDataPayload):
+    """
+    Returns all warehouse/route data for map visualization.
+    """
+    route_data = get_route_data(payload.customer_zip, payload.active_warehouses)
+    return route_data
+
+class RatesPayload(BaseModel):
+    origin_zip: str
+    dest_zip: str
+    weight_lbs: float
+
+@app.post("/logistics-rates")
+async def get_logistics_rates(payload: RatesPayload):
+    """
+    Returns carrier rate comparison from Shippo (or simulated).
+    """
+    import ast
+    rates_str = get_live_shipping_rates(payload.origin_zip, payload.dest_zip, payload.weight_lbs)
+    rates_data = ast.literal_eval(rates_str)
+    return rates_data
+
+class CarbonPayload(BaseModel):
+    origin_zip: str
+    dest_zip: str
+    weight_lbs: float
+    shipping_mode: str = "ground"
+
+@app.post("/logistics-carbon")
+async def get_logistics_carbon(payload: CarbonPayload):
+    """
+    Returns carbon footprint calculation for a shipment.
+    """
+    import ast
+    carbon_str = calculate_carbon_footprint(
+        payload.origin_zip, 
+        payload.dest_zip, 
+        payload.weight_lbs, 
+        payload.shipping_mode
+    )
+    carbon_data = ast.literal_eval(carbon_str)
+    return carbon_data
 
 if __name__ == "__main__":
     import uvicorn
