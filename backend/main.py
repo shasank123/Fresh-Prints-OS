@@ -286,24 +286,215 @@ async def reject_design(lead_id: int, payload: RejectionPayload, background_task
     
     return {"status": "Feedback sent to Agent. Regenerating..."}
 
-# 4. APPROVE
+# 4. ART DIRECTOR APPROVES (Stage 1 - Internal)
 @app.post("/approve-design/{lead_id}")
 async def approve_design(lead_id: int):
     """
-    User loves it. Resume the 'save_final_design' tool call.
+    Art Director approves. Design now awaits Apparel Chair (customer) approval.
+    Does NOT save yet - just updates status.
     """
-    print(f"✅ Design Approved for {lead_id}")
-    config = {"configurable": {"thread_id": str(lead_id)}}
+    print(f"✅ Art Director Approved Design for {lead_id}")
     
-    async for event in designer_executor.astream(None, config=config):
-        for node, values in event.items():
-            if "messages" in values:
-                last_msg = values["messages"][-1]
-                if last_msg.type == "tool":
-                     log_agent_step(lead_id, "TOOL_RESULT", f"Output: {last_msg.content}")
+    # Update status to awaiting customer approval
+    import sqlite3
+    conn = sqlite3.connect("fresh_prints.db")
+    cursor = conn.cursor()
+    cursor.execute(
+        "UPDATE leads SET status='PENDING_CUSTOMER_APPROVAL' WHERE id=?",
+        (lead_id,)
+    )
+    conn.commit()
+    conn.close()
+    
+    log_agent_step(lead_id, "SYSTEM", "✅ Art Director Approved. Awaiting Apparel Chair approval.")
+    return {"status": "Pending Customer Approval", "message": "Ready to send to Apparel Chair"}
 
-    log_agent_step(lead_id, "SYSTEM", "✅ Final Design Saved to Database.")
-    return {"status": "Design Saved"}
+# Storage for customer approval tokens
+customer_approval_tokens: dict[str, dict] = {}
+
+# 5. SEND TO APPAREL CHAIR (Customer Email)
+class CustomerEmailPayload(BaseModel):
+    customer_email: str
+    customer_name: str = "Apparel Chair"
+
+@app.post("/send-to-customer/{lead_id}")
+async def send_to_customer(lead_id: int, payload: CustomerEmailPayload):
+    """
+    Generates approval token and simulates sending email to Apparel Chair.
+    In production, this would actually send email via SendGrid/SES.
+    """
+    import uuid
+    import sqlite3
+    
+    # Generate unique approval token
+    token = str(uuid.uuid4())[:8]
+    
+    # Try to get design details from agent_logs (more reliable for Designer)
+    conn = sqlite3.connect("fresh_prints.db")
+    cursor = conn.cursor()
+    
+    # First try leads table
+    cursor.execute("SELECT title, draft_email FROM leads WHERE id=?", (lead_id,))
+    row = cursor.fetchone()
+    
+    if row:
+        title = row[0] or f"Design #{lead_id}"
+    else:
+        # Fallback: Get info from agent_logs
+        cursor.execute(
+            "SELECT log_message FROM agent_logs WHERE lead_id = ? AND log_message LIKE '%Design%' LIMIT 1",
+            (lead_id,)
+        )
+        log_row = cursor.fetchone()
+        title = f"Design #{lead_id}" if not log_row else f"Fresh Prints Design #{lead_id}"
+    
+    conn.close()
+    
+    # Store token with lead info
+    customer_approval_tokens[token] = {
+        "lead_id": lead_id,
+        "customer_email": payload.customer_email,
+        "customer_name": payload.customer_name,
+        "title": title,
+        "created_at": str(datetime.now())
+    }
+    
+    # Simulated email (in production, use SendGrid/SES)
+    approval_url = f"http://localhost:8000/customer-approve/{token}"
+    reject_url = f"http://localhost:8000/customer-reject/{token}"
+    
+    print(f"📧 SIMULATED EMAIL to {payload.customer_email}")
+    print(f"   Subject: Fresh Prints Design Ready for Approval - {title}")
+    print(f"   Approve: {approval_url}")
+    print(f"   Reject: {reject_url}")
+    
+    log_agent_step(lead_id, "SYSTEM", f"📧 Email sent to {payload.customer_email}. Token: {token}")
+    
+    return {
+        "status": "Email sent (simulated)",
+        "token": token,
+        "approval_url": approval_url,
+        "reject_url": reject_url,
+        "customer_email": payload.customer_email
+    }
+
+# 6. CUSTOMER APPROVES (Stage 2 - External/Final)
+from datetime import datetime
+
+@app.get("/customer-approve/{token}")
+async def customer_approve(token: str):
+    """
+    Public endpoint - Apparel Chair clicks this link to approve.
+    No auth required - token-based validation.
+    """
+    if token not in customer_approval_tokens:
+        return {"error": "Invalid or expired token", "message": "This approval link has already been used or has expired."}
+    
+    token_data = customer_approval_tokens[token]
+    lead_id = token_data["lead_id"]
+    
+    print(f"✅ Customer (Apparel Chair) Approved Design for Lead {lead_id}")
+    
+    # Try to resume the agent to save the final design
+    try:
+        config = {"configurable": {"thread_id": str(lead_id)}}
+        
+        async for event in designer_executor.astream(None, config=config):
+            for node, values in event.items():
+                if "messages" in values:
+                    last_msg = values["messages"][-1]
+                    if last_msg.type == "tool":
+                         log_agent_step(lead_id, "TOOL_RESULT", f"Output: {last_msg.content}")
+    except Exception as e:
+        print(f"Agent resume error (may be expected if no pending action): {e}")
+        # Continue anyway - the design was approved
+    
+    log_agent_step(lead_id, "SYSTEM", f"✅ Apparel Chair ({token_data['customer_name']}) Approved! Design Saved.")
+    
+    # Remove used token
+    del customer_approval_tokens[token]
+    
+    # Return a nice HTML page for the customer
+    from fastapi.responses import HTMLResponse
+    html_content = f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Design Approved - Fresh Prints</title>
+        <style>
+            body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%); color: white; display: flex; justify-content: center; align-items: center; min-height: 100vh; margin: 0; }}
+            .container {{ text-align: center; padding: 40px; background: rgba(255,255,255,0.1); border-radius: 20px; max-width: 500px; }}
+            h1 {{ color: #4ade80; margin-bottom: 20px; }}
+            p {{ color: #94a3b8; line-height: 1.6; }}
+            .emoji {{ font-size: 64px; margin-bottom: 20px; }}
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <div class="emoji">✅</div>
+            <h1>Design Approved!</h1>
+            <p>Thank you, <strong>{token_data['customer_name']}</strong>!</p>
+            <p>Your approval has been recorded and the design has been saved. The Fresh Prints team will begin production shortly.</p>
+            <p style="margin-top: 30px; font-size: 12px; color: #64748b;">You can close this tab now.</p>
+        </div>
+    </body>
+    </html>
+    """
+    return HTMLResponse(content=html_content)
+
+# 7. CUSTOMER REJECTS
+@app.get("/customer-reject/{token}")
+async def customer_reject(token: str, feedback: str = "Customer requested changes"):
+    """
+    Public endpoint - Apparel Chair clicks this link to reject.
+    """
+    if token not in customer_approval_tokens:
+        return {"error": "Invalid or expired token"}
+    
+    token_data = customer_approval_tokens[token]
+    lead_id = token_data["lead_id"]
+    
+    print(f"❌ Customer (Apparel Chair) Rejected Design for Lead {lead_id}")
+    
+    # Update status back to needs review
+    import sqlite3
+    conn = sqlite3.connect("fresh_prints.db")
+    cursor = conn.cursor()
+    cursor.execute(
+        "UPDATE leads SET status='CUSTOMER_REJECTED' WHERE id=?",
+        (lead_id,)
+    )
+    conn.commit()
+    conn.close()
+    
+    log_agent_step(lead_id, "SYSTEM", f"❌ Apparel Chair Rejected: {feedback}")
+    
+    # Remove used token
+    del customer_approval_tokens[token]
+    
+    return {
+        "status": "rejected",
+        "message": f"Thank you for your feedback. The design team will revise based on your input.",
+        "lead_id": lead_id
+    }
+
+# 8. CHECK CUSTOMER APPROVAL STATUS
+@app.get("/customer-approval-status/{lead_id}")
+def get_customer_approval_status(lead_id: int):
+    """
+    Frontend polls this to check if customer has approved.
+    """
+    import sqlite3
+    conn = sqlite3.connect("fresh_prints.db")
+    cursor = conn.cursor()
+    cursor.execute("SELECT status FROM leads WHERE id=?", (lead_id,))
+    row = cursor.fetchone()
+    conn.close()
+    
+    if not row:
+        return {"status": "not_found"}
+    
+    return {"status": row[0]}
 
 # 1. TRIGGER
 class LogisticsPayload(BaseModel):

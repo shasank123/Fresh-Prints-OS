@@ -72,6 +72,11 @@ export default function DesignerPage() {
     setPendingDesign(null);
     setApprovedDesign(null);
     setIsApproved(false);
+    // Reset Stage 2 state
+    setArtDirectorApproved(false);
+    setApprovalToken(null);
+    setApprovalUrl(null);
+    setCustomerApprovalStatus(null);
     // Keep design history across generations - don't clear it
     // setDesignHistory([]); // REMOVED: Now designs accumulate
     setSelectedColorIndex(null);
@@ -115,18 +120,92 @@ export default function DesignerPage() {
     return () => clearInterval(interval);
   }, [activeLeadId, isApproved, vibe, designHistory]);
 
-  // Approve design
+  // State for Apparel Chair (Stage 2) approval
+  const [artDirectorApproved, setArtDirectorApproved] = useState(false);
+  const [customerEmail, setCustomerEmail] = useState("apparelchair@university.edu");
+  const [customerName, setCustomerName] = useState("Apparel Chair");
+  const [approvalToken, setApprovalToken] = useState<string | null>(null);
+  const [approvalUrl, setApprovalUrl] = useState<string | null>(null);
+  const [customerApprovalStatus, setCustomerApprovalStatus] = useState<string | null>(null);
+
+  // Approve design (Stage 1 - Art Director)
   const handleApprove = async () => {
     if (!activeLeadId) return;
     try {
       await axios.post(`http://localhost:8000/approve-design/${activeLeadId}`);
       setApprovedDesign(pendingDesign);
       setPendingDesign(null);
-      setIsApproved(true);
+      setArtDirectorApproved(true); // Stage 1 complete
     } catch (e) {
       alert("Error approving design");
     }
   };
+
+  // Send to Apparel Chair (Stage 2)
+  const sendToCustomer = async () => {
+    console.log("sendToCustomer called", { activeLeadId, customerEmail });
+    if (!activeLeadId || !customerEmail.trim()) {
+      console.log("Missing activeLeadId or email");
+      alert("Missing lead ID or email");
+      return;
+    }
+    try {
+      const res = await axios.post(`http://localhost:8000/send-to-customer/${activeLeadId}`, {
+        customer_email: customerEmail,
+        customer_name: customerName
+      });
+      console.log("Response:", res.data);
+      setApprovalToken(res.data.token);
+      setApprovalUrl(res.data.approval_url);
+      setCustomerApprovalStatus("pending");
+    } catch (e: any) {
+      console.error("Error:", e);
+      alert("Error: " + (e.response?.data?.error || e.message));
+    }
+  };
+
+  // Poll for customer approval
+  useEffect(() => {
+    if (!activeLeadId || !approvalToken) return;
+
+    const checkCustomerStatus = async () => {
+      try {
+        // Check agent logs for Apparel Chair approval
+        const logsRes = await axios.get(`http://localhost:8000/logs/${activeLeadId}`);
+        const logs = logsRes.data.logs || [];
+
+        // Look for FINAL customer approval message in logs
+        // Must match "Apparel Chair...Approved!" with exclamation (not "Awaiting...approval")
+        const approvalLog = logs.find((l: any) =>
+          l.log_message?.includes('Apparel Chair') &&
+          l.log_message?.includes('Approved!') &&
+          l.log_message?.includes('Design Saved')
+        );
+
+        if (approvalLog) {
+          setCustomerApprovalStatus('APPROVED');
+          setIsApproved(true);
+          return;
+        }
+
+        // Also check rejection
+        const rejectionLog = logs.find((l: any) =>
+          l.log_message?.includes('Apparel Chair') && l.log_message?.includes('Rejected:')
+        );
+
+        if (rejectionLog) {
+          setCustomerApprovalStatus('REJECTED');
+          setArtDirectorApproved(false);
+          setApprovalToken(null);
+        }
+      } catch (e) {
+        console.error("Status check error", e);
+      }
+    };
+
+    const interval = setInterval(checkCustomerStatus, 3000);
+    return () => clearInterval(interval);
+  }, [activeLeadId, approvalToken]);
 
   // Reject design with feedback
   const handleReject = async () => {
@@ -333,8 +412,8 @@ export default function DesignerPage() {
             )}
           </div>
 
-          {/* Approval Actions */}
-          {pendingDesign?.status === "waiting_for_approval" && (
+          {/* Approval Actions - Stage 1: Art Director */}
+          {pendingDesign?.status === "waiting_for_approval" && !artDirectorApproved && (
             <div className="flex gap-3">
               <button
                 onClick={() => setShowRejectModal(true)}
@@ -348,8 +427,102 @@ export default function DesignerPage() {
                 className="flex-1 flex items-center justify-center gap-2 px-4 py-3 bg-green-500 text-white hover:bg-green-600 font-bold rounded-lg transition-all"
               >
                 <Check size={18} />
-                Approve
+                Approve (Art Director)
               </button>
+            </div>
+          )}
+
+          {/* Stage 2: Send to Apparel Chair */}
+          {artDirectorApproved && !approvalToken && (
+            <div className="bg-gradient-to-r from-purple-500/20 to-blue-500/20 p-4 rounded-xl border border-purple-500/50">
+              <div className="flex items-center gap-2 mb-3">
+                <span className="text-lg">📧</span>
+                <h3 className="text-white font-bold">Send to Apparel Chair for Final Approval</h3>
+              </div>
+              <p className="text-fp-slate text-sm mb-3">Art Director approved. Now send to the customer for final sign-off.</p>
+
+              <div className="space-y-3">
+                <input
+                  type="email"
+                  value={customerEmail}
+                  onChange={(e) => setCustomerEmail(e.target.value)}
+                  placeholder="Apparel Chair Email"
+                  className="w-full bg-black/30 border border-white/10 rounded-lg py-2 px-4 text-white placeholder-fp-slate/50 focus:outline-none focus:border-purple-500"
+                />
+                <input
+                  type="text"
+                  value={customerName}
+                  onChange={(e) => setCustomerName(e.target.value)}
+                  placeholder="Customer Name"
+                  className="w-full bg-black/30 border border-white/10 rounded-lg py-2 px-4 text-white placeholder-fp-slate/50 focus:outline-none focus:border-purple-500"
+                />
+                <button
+                  onClick={sendToCustomer}
+                  className="w-full flex items-center justify-center gap-2 px-4 py-3 bg-gradient-to-r from-purple-600 to-blue-600 hover:from-purple-500 hover:to-blue-500 text-white font-bold rounded-lg"
+                >
+                  📧 Send Design for Approval
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* Stage 2: Awaiting Customer Approval */}
+          {approvalToken && !isApproved && (
+            <div className="space-y-3">
+              <div className="bg-yellow-500/20 p-4 rounded-xl border border-yellow-500/50">
+                <div className="flex items-center gap-2 mb-2">
+                  <span className="text-lg animate-pulse">⏳</span>
+                  <h3 className="text-yellow-400 font-bold">Awaiting Apparel Chair Approval</h3>
+                </div>
+                <p className="text-fp-slate text-sm">Email sent to {customerEmail}. Waiting for their response...</p>
+              </div>
+
+              {/* Simulated Email Preview (for demo) */}
+              <div className="bg-white rounded-lg p-4 text-sm">
+                <div className="text-gray-500 text-xs mb-2">📧 EMAIL PREVIEW (Sent to {customerEmail})</div>
+                <div className="border-b pb-2 mb-2">
+                  <strong className="text-gray-900">Subject:</strong> Fresh Prints Design Ready for Approval
+                </div>
+                <div className="text-gray-700">
+                  <p className="mb-2">Hi {customerName},</p>
+                  <p className="mb-2">Your design is ready for review! Please click below to approve or request changes.</p>
+                  <div className="flex gap-2 mt-3">
+                    <a
+                      href={approvalUrl || "#"}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="px-4 py-2 bg-green-500 text-white rounded font-bold text-xs hover:bg-green-600"
+                      onClick={(e) => {
+                        // Simulate customer clicking approve (for demo)
+                        e.preventDefault();
+                        window.open(approvalUrl || "", "_blank");
+                      }}
+                    >
+                      ✓ Approve Design
+                    </a>
+                    <button className="px-4 py-2 bg-red-500 text-white rounded font-bold text-xs hover:bg-red-600">
+                      ✕ Request Changes
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              <p className="text-xs text-fp-slate text-center">
+                💡 Demo: Click "Approve Design" above to simulate customer approval
+              </p>
+            </div>
+          )}
+
+          {/* Stage 2 Complete: Customer Approved */}
+          {isApproved && (
+            <div className="bg-green-500/20 p-4 rounded-xl border border-green-500/50">
+              <div className="flex items-center gap-2">
+                <span className="text-lg">✅</span>
+                <div>
+                  <h3 className="text-green-400 font-bold">Design Fully Approved!</h3>
+                  <p className="text-fp-slate text-sm">Both Art Director and Apparel Chair have approved. Ready for production.</p>
+                </div>
+              </div>
             </div>
           )}
         </div>
