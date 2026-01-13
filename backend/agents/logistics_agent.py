@@ -34,6 +34,7 @@ async def run_logistics_agent(lead_id: int, customer_zip: str, order_qty: int, s
     
     1. INVENTORY CHECK: 
        - Call `scrape_supplier_inventory` to find stock levels at warehouses (NJ, TX, CA).
+       - IMPORTANT: If total inventory is less than {order_qty}, you MUST still proceed to step 7 and save a plan with status "INSUFFICIENT_STOCK".
     
     2. RISK ASSESSMENT:
        - Call `check_weather_risk` for warehouses with stock (use their ZIP codes: NJ=07001, TX=78701, CA=90001).
@@ -45,22 +46,28 @@ async def run_logistics_agent(lead_id: int, customer_zip: str, order_qty: int, s
     
     4. SHIPPING OPTIMIZATION:
        - Call `optimize_split_shipment` to calculate the best split across warehouses.
+       - If it returns "CRITICAL: Insufficient Stock", STILL PROCEED to step 7.
     
     5. CARRIER COMPARISON (IMPORTANT for cost savings):
        - Call `get_live_shipping_rates` from the best warehouse(s) to customer {customer_zip}.
        - Compare USPS, FedEx, and UPS options. Choose best value (cost vs. speed).
+       - Skip this step if inventory was insufficient.
     
     6. SUSTAINABILITY CALCULATION:
        - Call `calculate_carbon_footprint` with origin/dest and total weight.
        - Include the carbon_kg in your final plan for ESG reporting.
+       - Skip this step if inventory was insufficient.
     
-    7. FINAL DECISION:
-       - Call `save_logistics_plan` with:
-         * plan_details: warehouse sources, carrier chosen, ETAs
-         * total_cost: sum of all shipping costs
-         * carbon_kg: environmental impact
+    7. FINAL DECISION (ALWAYS REQUIRED):
+       - You MUST ALWAYS call `save_logistics_plan` at the end, even if:
+         * Inventory is insufficient (save plan_details="INSUFFICIENT STOCK: Need {order_qty}, only X available. Recommend backorder or production run.")
+         * Weather is critical (save with warning note)
+         * Any other issue occurs
+       - Include: warehouse sources, carrier chosen, ETAs, or failure reason
+       - total_cost: sum of shipping costs (or 0.0 if failed)
+       - carbon_kg: environmental impact (or 0.0 if failed)
     
-    Always explain your reasoning for carrier selection and warehouse prioritization.
+    CRITICAL: Never stop without saving a plan. Always complete step 7.
     """
     
     async for event in agent_executor.astream(

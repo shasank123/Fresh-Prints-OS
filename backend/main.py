@@ -2,10 +2,11 @@ import json
 from fastapi import FastAPI, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware 
 from pydantic import BaseModel
-from agents.scout_agent import run_dynamic_scout, agent_executor
+from agents.scout_agent import run_dynamic_scout, run_scout_with_feedback, agent_executor, scout_thread_map
 from agents.designer_agent import run_designer_agent, agent_executor as designer_executor
 from agents.logistics_agent import run_logistics_agent, run_logistics_agent_with_feedback, agent_executor as logistics_executor
 from database import log_agent_step
+from mcp_server import get_demand_forecast
 
 # Track active thread per lead (for rejection flow)
 lead_thread_map: dict[int, str] = {}
@@ -52,13 +53,25 @@ def get_agent_logs(lead_id: int):
     conn.close()
     return {"logs": logs}
 
+# --- DEMAND FORECAST API ---
+@app.get("/demand-forecast/{sku}")
+def get_forecast(sku: str, days: int = 7):
+    """
+    Returns demand forecast for a SKU.
+    """
+    result = get_demand_forecast(sku, days)
+    return json.loads(result)
+
 # --- 3. PEEK AT THE PENDING DRAFT (Before Approval) ---
 @app.get("/lead-pending-draft/{lead_id}")
 async def get_pending_draft(lead_id: int):
     """
     UI calls this to see WHAT the agent wants to save.
+    Enhanced to return sentiment and lead_score for display.
     """
-    config = {"configurable": {"thread_id": str(lead_id)}}
+    # Use tracked thread (handles rejection with new thread)
+    thread_id = scout_thread_map.get(lead_id, str(lead_id))
+    config = {"configurable": {"thread_id": thread_id}}
     
     # Get the frozen state from LangGraph
     state = agent_executor.get_state(config)
@@ -92,7 +105,9 @@ async def get_pending_draft(lead_id: int):
                     return {
                         "status": "waiting_for_approval",
                         "pending_draft": args.get('email_draft'),
-                        "strategy": args.get('strategy')
+                        "strategy": args.get('strategy'),
+                        "sentiment": args.get('sentiment', 'NEUTRAL'),
+                        "lead_score": args.get('lead_score', 75)
                     }
                 except json.JSONDecodeError:
                     return {"status": "error", "detail": "Could not parse agent arguments"}
@@ -107,7 +122,9 @@ async def approve_lead(lead_id: int):
     """
     print(f"👍 Human Approved Lead {lead_id}. Resuming Agent...")
     
-    config = {"configurable": {"thread_id": str(lead_id)}}
+    # Use tracked thread for consistency
+    thread_id = scout_thread_map.get(lead_id, str(lead_id))
+    config = {"configurable": {"thread_id": thread_id}}
     
     # Resume the graph (Input None tells it to just proceed with the pending action)
     async for event in agent_executor.astream(None, config=config):
@@ -121,6 +138,33 @@ async def approve_lead(lead_id: int):
     log_agent_step(lead_id, "SYSTEM", "✅ Draft Saved to CRM after Human Approval.")
     
     return {"status": "Agent Resumed and Finished"}
+
+# --- 5. REJECT LEAD AND REGENERATE ---
+class ScoutRejectionPayload(BaseModel):
+    feedback: str
+
+@app.post("/reject-lead/{lead_id}")
+async def reject_lead(lead_id: int, payload: ScoutRejectionPayload, background_tasks: BackgroundTasks):
+    """
+    Human rejects the draft. We inject feedback and restart the agent.
+    """
+    import asyncio
+    import time
+    
+    # Generate new thread ID for this rejection attempt
+    new_thread_id = f"{lead_id}_scout_v{int(time.time())}"
+    scout_thread_map[lead_id] = new_thread_id
+    
+    print(f"❌ Scout Draft Rejected for {lead_id}: {payload.feedback} -> New Thread: {new_thread_id}")
+    log_agent_step(lead_id, "SYSTEM", f"❌ Draft Rejected. Feedback: {payload.feedback}")
+    
+    def run_async_agent_with_feedback(lead_id, feedback, thread_id):
+        """Wrapper to run async agent with feedback in background thread"""
+        asyncio.run(run_scout_with_feedback(lead_id, feedback, thread_id))
+    
+    background_tasks.add_task(run_async_agent_with_feedback, lead_id, payload.feedback, new_thread_id)
+    
+    return {"status": "Feedback sent to Agent. Regenerating draft..."}
 
 class DesignPayload(BaseModel):
     lead_id: int
@@ -141,13 +185,36 @@ async def trigger_designer(payload: DesignPayload, background_tasks: BackgroundT
     background_tasks.add_task(run_async_agent, payload.lead_id, payload.vibe)
     return {"status": "Designer Started"}
 
-# 2. GET PENDING DESIGN (For UI)
+# 2. GET PENDING DESIGN (For UI) - Enhanced to return tool results
 @app.get("/design-pending-review/{lead_id}")
 async def get_pending_design(lead_id: int):
     # Use the tracked thread (handles rejection with new thread)
     thread_id = lead_thread_map.get(lead_id, str(lead_id))
     config = {"configurable": {"thread_id": thread_id}}
     state = designer_executor.get_state(config)
+    
+    # Helper to extract tool results from message history
+    def extract_tool_results(messages):
+        results = {
+            "color_palette": None,
+            "print_technique": None,
+            "profitability": None
+        }
+        for msg in messages:
+            if hasattr(msg, 'type') and msg.type == 'tool':
+                content = str(msg.content)
+                try:
+                    # Try to parse as JSON
+                    data = json.loads(content)
+                    if 'palette' in data:
+                        results['color_palette'] = data
+                    elif 'recommended_technique' in data:
+                        results['print_technique'] = data
+                    elif 'margin_percent' in data:
+                        results['profitability'] = data
+                except:
+                    pass
+        return results
     
     if state.next:
         last_message = state.values["messages"][-1]
@@ -172,10 +239,21 @@ async def get_pending_design(lead_id: int):
             if tool_name == "save_final_design":
                 try:
                     args = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
+                    
+                    # Extract tool results from message history
+                    tool_results = extract_tool_results(state.values["messages"])
+                    
                     return {
                         "status": "waiting_for_approval",
                         "image_url": args.get('image_url'),
-                        "cost_report": args.get('cost_report')
+                        "cost_report": args.get('cost_report'),
+                        "color_count": args.get('color_count', 5),
+                        "print_technique_name": args.get('print_technique', 'Screen Print'),
+                        "profit_margin": args.get('profit_margin', 60.0),
+                        # Include parsed tool results
+                        "color_palette": tool_results.get('color_palette'),
+                        "print_technique": tool_results.get('print_technique'),
+                        "profitability": tool_results.get('profitability')
                     }
                 except json.JSONDecodeError:
                     return {"status": "error", "detail": "Could not parse arguments"}
@@ -319,10 +397,27 @@ async def get_logistics_plan(lead_id: int):
 # 3. APPROVE PLAN
 @app.post("/approve-logistics/{lead_id}")
 async def approve_logistics(lead_id: int):
+    import sqlite3
+    
     print(f"✅ Logistics Plan Approved for {lead_id}")
     # Use tracked thread for consistency
     thread_id = logistics_thread_map.get(lead_id, str(lead_id))
     config = {"configurable": {"thread_id": thread_id}}
+    
+    # Check THIS lead's logs for failure (not state which may have old messages)
+    is_failed = False
+    try:
+        conn = sqlite3.connect("fresh_prints.db")
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT log_message FROM agent_logs WHERE lead_id = ? AND log_message LIKE '%insufficient%'",
+            (lead_id,)
+        )
+        if cursor.fetchone():
+            is_failed = True
+        conn.close()
+    except Exception as e:
+        print(f"Log check error: {e}")
     
     async for event in logistics_executor.astream(None, config=config):
         for node, values in event.items():
@@ -331,7 +426,11 @@ async def approve_logistics(lead_id: int):
                 if last_msg.type == "tool":
                      log_agent_step(lead_id, "TOOL_RESULT", f"Output: {last_msg.content}")
 
-    log_agent_step(lead_id, "SYSTEM", "✅ Order Routed & Saved.")
+    # Log appropriate message based on outcome
+    if is_failed:
+        log_agent_step(lead_id, "SYSTEM", "❌ Order Failed - Insufficient Stock. Customer notified.")
+    else:
+        log_agent_step(lead_id, "SYSTEM", "✅ Order Routed & Saved.")
     return {"status": "Plan Executed"}
 
 # 4. REJECT PLAN (Feedback Loop)

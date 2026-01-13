@@ -1,21 +1,29 @@
-# --- Core Frameworks ---
-fastapi>=0.115.0
-uvicorn>=0.32.0
-pydantic>=2.10.0
-python-dotenv>=1.0.1
+# --- Web & API ---
+fastapi
+uvicorn
+python-dotenv
+requests
+pydantic
 
-# --- AI & Agents ---
-langchain>=0.3.0
-langchain-openai>=0.2.0
-langgraph>=0.2.0
-langchain-community>=0.3.0
+# --- AI & Frameworks ---
+openai
+langchain
+langchain-community
+langchain-openai
+langchain-core
+langgraph
+mcp
 
-# --- Tools & Scraping (Real Data) ---
-duckduckgo-search>=6.0.0
-beautifulsoup4>=4.12.3
-feedparser>=6.0.10
-requests>=2.32.0
-mcp>=1.0.0  # Model Context Protocol SDK
+# --- Tools & Scraping ---
+duckduckgo-search
+feedparser
+beautifulsoup4  # (This creates the 'bs4' folder you saw)
 
-# --- Database ---
-# SQLite is built-in
+# --- Data, Vision & RAG (The "Heavy" Stuff) ---
+chromadb        # (This pulled in torch, transformers, posthog, etc.)
+scikit-learn    # (This creates the 'sklearn' folder)
+numpy
+pillow          # (This creates the 'PIL' folder)
+
+# --- Logistics ---
+geopy

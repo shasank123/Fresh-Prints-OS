@@ -53,29 +53,58 @@ async def run_designer_agent(lead_id: int, vibe: str, feedback: str = None, thre
         
         Please generate a COMPLETELY NEW design that addresses this feedback.
         
-        Follow this EXACT process:
-        1. Call `generate_apparel_image` with a NEW creative prompt that addresses the feedback.
-        2. Call `check_copyright_safety` with the generated image URL.
-        3. If UNSAFE, generate a new image. If SAFE, continue.
+        Follow this process:
+        1. Call `generate_apparel_image` with a NEW creative prompt addressing the feedback.
+        2. Call `check_copyright_safety` - if UNSAFE, regenerate.
+        3. Call `extract_color_palette` to identify the colors used.
         4. Call `calculate_manufacturing_cost` with the image URL.
-        5. Finally, call `save_final_design` with the image_url and cost_report.
+        5. Call `recommend_print_technique` based on colors and assumed 100 qty.
+        6. Call `calculate_profitability` with the cost.
+        7. Finally, call `save_final_design` with all collected data.
         
-        Begin now with step 1.
+        Begin now.
         """
     else:
-        # FRESH START
+        # FRESH START - Full comprehensive workflow
         log_agent_step(lead_id, "SYSTEM", f"🎨 Designer started. Vibe: {vibe}")
         query = f"""
         You are a Senior T-Shirt Designer at Fresh Prints. Lead ID: {lead_id}. Design Vibe: '{vibe}'.
         
-        Follow this EXACT process:
-        1. Call `generate_apparel_image` with a creative prompt based on the vibe.
-        2. Call `check_copyright_safety` with the generated image URL.
-        3. If UNSAFE, generate a new image. If SAFE, continue.
-        4. Call `calculate_manufacturing_cost` with the image URL.
-        5. Finally, call `save_final_design` with the image_url and cost_report.
+        Execute this COMPREHENSIVE design workflow to impress the client:
         
-        Begin now with step 1.
+        STEP 1: DESIGN GENERATION
+        - Call `generate_apparel_image` with a creative prompt based on the vibe '{vibe}'.
+        
+        STEP 2: COMPLIANCE CHECK
+        - Call `check_copyright_safety` with the generated image URL.
+        - If UNSAFE, regenerate with `generate_apparel_image` using a modified prompt.
+        
+        STEP 3: COLOR ANALYSIS
+        - Call `extract_color_palette` to identify dominant colors and get hex codes.
+        - Note the color count for printing decisions.
+        
+        STEP 4: COST CALCULATION
+        - Call `calculate_manufacturing_cost` with the image URL.
+        - Parse the cost per unit from the result.
+        
+        STEP 5: PRINT TECHNIQUE
+        - Call `recommend_print_technique` with the number of colors detected and order_qty=100.
+        - Note the recommended technique and total print cost.
+        
+        STEP 6: PROFITABILITY ANALYSIS
+        - Call `calculate_profitability` with the cost per unit and order_qty=100.
+        - Note the profit margin and suggested retail price.
+        
+        STEP 7: FINAL SAVE
+        - Call `save_final_design` with:
+          * lead_id: {lead_id}
+          * image_url: the generated design URL
+          * cost_report: full cost breakdown
+          * color_count: number of colors from palette
+          * print_technique: recommended technique
+          * profit_margin: calculated margin percentage
+        
+        Begin with Step 1 now. Execute all steps in order.
         """
 
     try:

@@ -33,11 +33,18 @@ agent_executor = create_react_agent(
     interrupt_before=["tools"] 
 )
 
+# Track active thread per lead (for rejection flow)
+scout_thread_map: dict[int, str] = {}
+
 async def run_dynamic_scout(lead_id: int, event_title: str):
+    """Main entry point for Scout Agent - fresh research."""
     log_agent_step(lead_id, "SYSTEM", f"🚀 Agent started for: {event_title}")
     logger.info(f"Starting scout agent for lead {lead_id}: {event_title}")
     
-    config = {"configurable": {"thread_id": str(lead_id)}}
+    # Track thread for this lead
+    thread_id = str(lead_id)
+    scout_thread_map[lead_id] = thread_id
+    config = {"configurable": {"thread_id": thread_id}}
 
     query = f"""
     You are a Senior Sales Scout at Fresh Prints, a custom apparel company. 
@@ -45,18 +52,73 @@ async def run_dynamic_scout(lead_id: int, event_title: str):
     Your current task is to research and draft an outreach email for this lead:
     Lead: '{event_title}' (ID: {lead_id})
     
-    You MUST follow these steps in order:
+    You MUST follow these steps in order to gather comprehensive intelligence:
     
-    STEP 1: Call the search_university_news tool to find recent news about this organization.
-    STEP 2: Call the analyze_visual_vibe tool to understand their visual style.
-    STEP 3: Call the save_lead_strategy tool with your email_draft and strategy.
+    STEP 1: RESEARCH - Call `search_university_news` to find recent news about this organization.
+    
+    STEP 2: SENTIMENT - Call `analyze_news_sentiment` with the news you found to understand if this is positive/negative news.
+             Note the recommended tone for your email.
+    
+    STEP 3: SOCIAL PRESENCE - Call `find_organization_socials` to discover their LinkedIn/Instagram/Twitter presence.
+    
+    STEP 4: COMPETITIVE INTEL - Call `check_existing_apparel` to see if they have existing merch partnerships.
+    
+    STEP 5: VISUAL VIBE - Call `analyze_visual_vibe` to understand their brand aesthetic and colors.
+    
+    STEP 6: EMAIL TEMPLATE - Based on the sentiment analysis, call `get_email_template` with the recommended tone
+             (formal, casual, congratulatory, or event_pitch).
+    
+    STEP 7: SAVE STRATEGY - Call `save_lead_strategy` with:
+             - lead_id: {lead_id}
+             - strategy: Your key findings summary
+             - email_draft: A personalized email using the template, filled with your research
+             - sentiment: The sentiment you detected (POSITIVE/NEUTRAL/NEGATIVE)
+             - lead_score: A score from 1-100 based on how promising this lead is
     
     Do NOT skip any steps. Begin with Step 1 now.
     """
     
+    return await _execute_scout_loop(lead_id, query, config)
+
+
+async def run_scout_with_feedback(lead_id: int, feedback: str, thread_id: str):
+    """Re-run Scout Agent with human feedback after rejection."""
+    log_agent_step(lead_id, "SYSTEM", f"🔄 Regenerating with feedback: {feedback}")
+    logger.info(f"Restarting scout for lead {lead_id} with feedback: {feedback}")
+    
+    # Update thread tracking
+    scout_thread_map[lead_id] = thread_id
+    config = {"configurable": {"thread_id": thread_id}}
+    
+    query = f"""
+    You are a Senior Sales Scout at Fresh Prints. Lead ID: {lead_id}.
+    
+    The previous email draft was REJECTED with this feedback: '{feedback}'
+    
+    Please generate a COMPLETELY NEW draft that addresses this feedback.
+    
+    You may re-use some previous research, but focus on:
+    1. Understanding what the human didn't like based on their feedback
+    2. Adjusting the tone/style accordingly
+    3. Perhaps trying a different email template type
+    
+    Steps:
+    1. If feedback mentions tone, call `get_email_template` with a different type (formal/casual/congratulatory/event_pitch)
+    2. If feedback mentions research, re-run relevant research tools
+    3. Call `save_lead_strategy` with your improved draft
+    
+    Address the feedback: '{feedback}'
+    Begin now.
+    """
+    
+    return await _execute_scout_loop(lead_id, query, config)
+
+
+async def _execute_scout_loop(lead_id: int, query: str, config: dict):
+    """Internal execution loop shared by both entry points."""
     try:
         # First run: Start the agent
-        logger.info("Starting initial agent execution...")
+        logger.info("Starting agent execution...")
         async for event in agent_executor.astream(
             {"messages": [HumanMessage(content=query)]}, 
             config=config
@@ -81,7 +143,7 @@ async def run_dynamic_scout(lead_id: int, event_title: str):
             return "Done"
         
         # Auto-resume loop for non-save tools
-        max_iterations = 10
+        max_iterations = 15  # Increased to handle more tools
         for iteration in range(max_iterations):
             logger.info(f"Iteration {iteration + 1}/{max_iterations}")
             

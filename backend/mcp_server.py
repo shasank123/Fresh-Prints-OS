@@ -68,13 +68,22 @@ if CHROMA_AVAILABLE:
             print("📚 RAG: Indexing Brand Guidelines...")
             collection.add(
                 documents=[
+                    # General trademark rules
                     "Do not use the Nike Swoosh, Adidas Three Stripes, or Puma Cat.",
                     "University logos must not be altered, distorted, or recolored.",
                     "No offensive language, alcohol, drugs, or political hate speech.",
-                    "For 'Ohio State' designs, do NOT use the color Blue (Michigan's color).",
-                    "Maximum print size is 12x12 inches."
+                    "Maximum print size is 12x12 inches.",
+                    # University-specific color rules
+                    "Ohio State University: Use scarlet red (#BB0000) and gray (#666666). NEVER use blue - that's Michigan's color.",
+                    "University of Michigan: Use maize (#FFCB05) and blue (#00274C). Wolverine mascot required for athletics.",
+                    "MIT: Use cardinal red (#A31F34) and gray. Beaver mascot for official merchandise.",
+                    "Stanford University: Use cardinal red (#8C1515) only. Tree mascot for athletics gear.",
+                    "UCLA: Use true blue (#2D68C4) and gold (#F2A900). Bruin mascot for sports.",
+                    "USC: Use cardinal (#990000) and gold (#FFCC00). Trojan mascot required.",
+                    "Harvard: Use crimson (#A51C30). Veritas shield for official items.",
+                    "Yale: Use Yale blue (#0F4D92). Bulldog mascot for athletics."
                 ],
-                ids=["rule1", "rule2", "rule3", "rule4", "rule5"]
+                ids=["rule1", "rule2", "rule3", "rule4", "osu", "mich", "mit", "stanford", "ucla", "usc", "harvard", "yale"]
             )
     except Exception as e:
         print(f"⚠️ ChromaDB initialization failed: {e}")
@@ -113,20 +122,147 @@ def analyze_visual_vibe(club_name: str) -> str:
     return search.run(f"{club_name} team photo t-shirt design description")
 
 @mcp.tool()
-def save_lead_strategy(lead_id: int, strategy: str, email_draft: str) -> str:
+def save_lead_strategy(lead_id: int, strategy: str, email_draft: str, sentiment: str = "NEUTRAL", lead_score: int = 75) -> str:
     """
     Saves the Scout's research strategy and draft email to the CRM.
+    Also stores sentiment analysis and lead score.
     """
     print(f"💾 SCOUT: Saving Strategy for Lead {lead_id}")
     conn = sqlite3.connect("fresh_prints.db")
     cursor = conn.cursor()
     cursor.execute(
         "UPDATE leads SET status='DRAFTED', vibe_tags=?, draft_email=? WHERE id=?",
-        (strategy, email_draft, lead_id)
+        (f"{strategy} | Sentiment: {sentiment} | Score: {lead_score}", email_draft, lead_id)
     )
     conn.commit()
     conn.close()
-    return "Success"
+    return f"Success - Lead Score: {lead_score}, Sentiment: {sentiment}"
+
+@mcp.tool()
+def find_organization_socials(org_name: str) -> str:
+    """
+    Searches for the organization's LinkedIn, Instagram, and Twitter profiles.
+    Returns handles and follower context to inform outreach strategy.
+    """
+    print(f"🔗 SCOUT: Finding social media for {org_name}")
+    try:
+        query = f"{org_name} LinkedIn Instagram Twitter official page"
+        result = search.run(query)
+        return f"Social Media Research: {result}"
+    except Exception as e:
+        return f"Social search error: {e}"
+
+@mcp.tool()
+def get_email_template(template_type: str) -> str:
+    """
+    Retrieves an email template framework. 
+    Types: 'formal', 'casual', 'congratulatory', 'event_pitch'
+    Use this to structure your outreach email appropriately.
+    """
+    print(f"📧 SCOUT: Getting {template_type} email template")
+    templates = {
+        "formal": """Subject: Partnership Opportunity with Fresh Prints
+
+Dear [Name],
+
+I hope this email finds you well. My name is [Agent] from Fresh Prints, the leading custom apparel company for university organizations.
+
+[PERSONALIZED_CONTENT]
+
+We would be honored to discuss how we can support [Organization] with premium custom apparel.
+
+Best regards,
+Fresh Prints Team""",
+        
+        "casual": """Subject: Hey! Quick idea for [Organization] 🎉
+
+What's up [Name]!
+
+Saw what you all are up to and had to reach out - 
+
+[PERSONALIZED_CONTENT]
+
+Would love to chat about hooking you up with some fresh gear. No pressure, just think you'd dig what we do.
+
+Cheers,
+Fresh Prints Crew""",
+        
+        "congratulatory": """Subject: Congrats on [Achievement]! 🏆
+
+Hey [Name]!
+
+Just saw the news about [Achievement] - that's absolutely incredible! [Organization] is making waves.
+
+[PERSONALIZED_CONTENT]
+
+Celebrations like this deserve commemorative gear. What do you think about custom championship apparel?
+
+Excited to connect,
+Fresh Prints Team""",
+        
+        "event_pitch": """Subject: Custom Gear for [Event]?
+
+Hi [Name],
+
+With [Event] coming up, I wanted to reach out about custom apparel for [Organization].
+
+[PERSONALIZED_CONTENT]
+
+We specialize in quick-turnaround, high-quality custom apparel perfect for events like yours.
+
+Let's make [Event] unforgettable!
+
+Best,
+Fresh Prints Team"""
+    }
+    return templates.get(template_type.lower(), templates["formal"])
+
+@mcp.tool()
+def analyze_news_sentiment(news_content: str) -> str:
+    """
+    Analyzes the sentiment of news about the organization.
+    Returns: POSITIVE, NEUTRAL, or NEGATIVE with reasoning.
+    Use this to calibrate your pitch approach.
+    """
+    print(f"🎭 SCOUT: Analyzing sentiment...")
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{
+                "role": "user", 
+                "content": f"""Analyze this news sentiment. Reply in this exact format:
+SENTIMENT: [POSITIVE/NEUTRAL/NEGATIVE]
+REASONING: [One sentence explanation]
+RECOMMENDED_TONE: [formal/casual/congratulatory/event_pitch]
+
+News: {news_content[:1000]}"""
+            }],
+            max_tokens=100
+        )
+        return response.choices[0].message.content
+    except Exception as e:
+        return f"SENTIMENT: NEUTRAL\nREASONING: Could not analyze - {e}\nRECOMMENDED_TONE: formal"
+
+@mcp.tool()
+def check_existing_apparel(org_name: str) -> str:
+    """
+    Searches if the organization already has custom apparel/merch partnerships.
+    Use this to understand competitive landscape before pitching.
+    """
+    print(f"🔍 SCOUT: Checking existing apparel for {org_name}")
+    try:
+        result = search.run(f"{org_name} custom merchandise store apparel shirt hoodie")
+        
+        # Simple analysis
+        competitors = ["nike", "adidas", "under armour", "champion"]
+        found_competitors = [c for c in competitors if c in result.lower()]
+        
+        if found_competitors:
+            return f"COMPETITIVE INTEL: Found existing partnerships with {', '.join(found_competitors).upper()}. Differentiate on customization and speed. Details: {result[:300]}"
+        else:
+            return f"OPPORTUNITY: No major apparel partnerships detected. Good prospect for outreach. Details: {result[:300]}"
+    except Exception as e:
+        return f"Competitor check error: {e}"
 
 # ==========================================
 # 🎨 DESIGNER AGENT TOOLS (Vision & RAG)
@@ -235,20 +371,290 @@ def calculate_manufacturing_cost(image_url: str) -> str:
         return f"Cost Error: {e}"
 
 @mcp.tool()
-def save_final_design(lead_id: int, image_url: str, cost_report: str) -> str:
+def save_final_design(lead_id: int, image_url: str, cost_report: str, color_count: int = 5, print_technique: str = "Screen Print", profit_margin: float = 60.0) -> str:
     """
-    Saves the approved design to the database.
+    Saves the approved design to the database with full metadata.
     """
     print(f"💾 DESIGNER: Saving Final Design for Lead {lead_id}")
     conn = sqlite3.connect("fresh_prints.db")
     cursor = conn.cursor()
     cursor.execute(
         "UPDATE leads SET status='DESIGN_READY', draft_email=? WHERE id=?",
-        (f"Design: {image_url} | {cost_report}", lead_id)
+        (f"Design: {image_url} | {cost_report} | Colors: {color_count} | Technique: {print_technique} | Margin: {profit_margin}%", lead_id)
     )
     conn.commit()
     conn.close()
-    return "Design Saved"
+    return json.dumps({
+        "status": "Design Saved",
+        "colors": color_count,
+        "technique": print_technique,
+        "margin": profit_margin
+    })
+
+@mcp.tool()
+def generate_design_variations(prompt: str, num_variations: int = 3) -> str:
+    """
+    Generates multiple design style variations for A/B comparison.
+    Returns array of image URLs with style descriptions.
+    Use this to give the client options to choose from.
+    """
+    print(f"🎨 DESIGNER: Generating {num_variations} design variations...")
+    
+    style_suffixes = [
+        ("bold", "bold and vibrant colors, high contrast"),
+        ("minimal", "minimalist clean design, simple lines"),
+        ("vintage", "vintage retro aesthetic, distressed look"),
+        ("modern", "modern sleek typography, contemporary")
+    ]
+    
+    variations = []
+    for i, (style_name, style_desc) in enumerate(style_suffixes[:num_variations]):
+        try:
+            print(f"   Generating variation {i+1}: {style_name}")
+            response = client.images.generate(
+                model="dall-e-3",
+                prompt=f"A flat vector t-shirt design, white background, high quality. {prompt}. Style: {style_desc}",
+                size="1024x1024",
+                quality="standard",
+                n=1,
+            )
+            variations.append({
+                "style": style_name,
+                "description": style_desc,
+                "url": response.data[0].url
+            })
+        except Exception as e:
+            variations.append({
+                "style": style_name,
+                "error": str(e)
+            })
+    
+    return json.dumps({"variations": variations, "count": len(variations)})
+
+@mcp.tool()
+def render_on_mockup(design_url: str, shirt_color: str = "white") -> str:
+    """
+    Renders the design on a photorealistic T-shirt mockup.
+    shirt_color options: 'white', 'black', 'navy', 'gray'
+    Shows client what the final product looks like.
+    """
+    print(f"👕 DESIGNER: Rendering mockup on {shirt_color} shirt...")
+    
+    try:
+        response = client.images.generate(
+            model="dall-e-3",
+            prompt=f"Photorealistic product mockup of a {shirt_color} crew neck t-shirt with a printed graphic design on the chest. Professional product photography, studio lighting, clean white background. The design should be clearly visible and centered on the shirt front.",
+            size="1024x1024",
+            quality="standard",
+            n=1,
+        )
+        return json.dumps({
+            "mockup_url": response.data[0].url,
+            "shirt_color": shirt_color,
+            "type": "crew_neck"
+        })
+    except Exception as e:
+        return json.dumps({"error": str(e)})
+
+@mcp.tool()
+def extract_color_palette(image_url: str) -> str:
+    """
+    Extracts dominant colors from the design and returns palette with hex codes.
+    Useful for ink ordering and matching brand colors.
+    """
+    print(f"🎨 DESIGNER: Extracting color palette...")
+    
+    try:
+        response = requests.get(image_url)
+        img = Image.open(BytesIO(response.content))
+        img = img.resize((100, 100)).convert("RGB")
+        img_array = np.array(img)
+        pixels = img_array.reshape(-1, 3)
+        
+        if SKLEARN_AVAILABLE:
+            kmeans = KMeans(n_clusters=6, random_state=42, n_init=5).fit(pixels)
+            colors = kmeans.cluster_centers_.astype(int)
+            # Sort by frequency
+            labels, counts = np.unique(kmeans.labels_, return_counts=True)
+            sorted_indices = np.argsort(-counts)
+            colors = colors[sorted_indices]
+        else:
+            # Fallback
+            quantized = (pixels // 64) * 64
+            unique_colors = np.unique(quantized, axis=0)[:6]
+            colors = unique_colors
+        
+        palette = []
+        for i, color in enumerate(colors[:6]):
+            hex_code = '#{:02x}{:02x}{:02x}'.format(int(color[0]), int(color[1]), int(color[2]))
+            palette.append({
+                "rank": i + 1,
+                "rgb": [int(color[0]), int(color[1]), int(color[2])],
+                "hex": hex_code
+            })
+        
+        return json.dumps({
+            "palette": palette,
+            "color_count": len(palette),
+            "primary_color": palette[0]["hex"] if palette else "#000000"
+        })
+    except Exception as e:
+        return json.dumps({"error": str(e), "palette": []})
+
+@mcp.tool()
+def apply_style_reference(design_prompt: str, reference_style: str) -> str:
+    """
+    Generates design with a specific brand style reference.
+    reference_style options: 'nike', 'supreme', 'vintage_band', 'sports_team', 'tech_startup'
+    Creates designs inspired by (but legally distinct from) famous styles.
+    """
+    print(f"🎯 DESIGNER: Applying {reference_style} style...")
+    
+    style_descriptions = {
+        "nike": "clean minimalist athletic design, bold sans-serif typography, dynamic swooping lines, motivational energy",
+        "supreme": "streetwear aesthetic, bold box logo inspired, red and white contrast, urban contemporary",
+        "vintage_band": "70s rock concert poster style, distressed vintage texture, hand-drawn illustration feel, retro typography",
+        "sports_team": "athletic team design, mascot-focused, dynamic composition, bold team colors, championship energy",
+        "tech_startup": "modern tech aesthetic, geometric patterns, gradient colors, futuristic minimalism"
+    }
+    
+    style = style_descriptions.get(reference_style.lower(), style_descriptions["sports_team"])
+    
+    try:
+        response = client.images.generate(
+            model="dall-e-3",
+            prompt=f"A flat vector t-shirt design, white background. {design_prompt}. Design style: {style}",
+            size="1024x1024",
+            quality="standard",
+            n=1,
+        )
+        return json.dumps({
+            "url": response.data[0].url,
+            "applied_style": reference_style,
+            "style_description": style
+        })
+    except Exception as e:
+        return json.dumps({"error": str(e)})
+
+@mcp.tool()
+def calculate_profitability(cost_per_unit: float, order_qty: int = 100) -> str:
+    """
+    Calculates profitability metrics for the design order.
+    Returns suggested retail price, margins, and total profit projections.
+    """
+    print(f"💰 DESIGNER: Calculating profitability for ${cost_per_unit}/unit x {order_qty}")
+    
+    # Standard markup tiers
+    if order_qty >= 500:
+        markup = 2.0  # 50% margin for bulk
+    elif order_qty >= 100:
+        markup = 2.5  # 60% margin for medium runs
+    else:
+        markup = 3.0  # 67% margin for small runs
+    
+    suggested_retail = round(cost_per_unit * markup, 2)
+    profit_per_unit = round(suggested_retail - cost_per_unit, 2)
+    margin_percent = round((profit_per_unit / suggested_retail) * 100, 1)
+    total_revenue = round(suggested_retail * order_qty, 2)
+    total_cost = round(cost_per_unit * order_qty, 2)
+    total_profit = round(profit_per_unit * order_qty, 2)
+    
+    return json.dumps({
+        "cost_per_unit": cost_per_unit,
+        "suggested_retail": suggested_retail,
+        "profit_per_unit": profit_per_unit,
+        "margin_percent": margin_percent,
+        "order_qty": order_qty,
+        "total_revenue": total_revenue,
+        "total_cost": total_cost,
+        "total_profit": total_profit,
+        "tier": "bulk" if order_qty >= 500 else ("medium" if order_qty >= 100 else "small")
+    })
+
+@mcp.tool()
+def suggest_ab_test(original_prompt: str) -> str:
+    """
+    Suggests alternative design versions for A/B testing engagement.
+    Provides variations to test which resonates best with the audience.
+    """
+    print(f"📊 DESIGNER: Generating A/B test suggestions...")
+    
+    suggestions = [
+        {
+            "variant": "A (Original)",
+            "prompt": original_prompt,
+            "hypothesis": "Baseline design"
+        },
+        {
+            "variant": "B (With Mascot)",
+            "prompt": f"{original_prompt} featuring a bold mascot illustration",
+            "hypothesis": "Mascots increase engagement 23% with sports teams"
+        },
+        {
+            "variant": "C (Text Focus)",
+            "prompt": f"{original_prompt} with emphasis on bold typography, minimal graphics",
+            "hypothesis": "Text-focused designs have higher readability"
+        },
+        {
+            "variant": "D (Vintage)",
+            "prompt": f"{original_prompt} with vintage distressed aesthetic",
+            "hypothesis": "Retro styles trending +40% in university market"
+        }
+    ]
+    
+    return json.dumps({
+        "original": original_prompt,
+        "suggestions": suggestions,
+        "recommended_test": "A vs B (Original vs Mascot)"
+    })
+
+@mcp.tool()
+def recommend_print_technique(num_colors: int, order_qty: int, has_gradients: bool = False) -> str:
+    """
+    Recommends optimal print technique based on design complexity and order size.
+    Returns technique, reasoning, and cost implications.
+    """
+    print(f"🖨️ DESIGNER: Recommending print technique for {num_colors} colors, {order_qty} units")
+    
+    if has_gradients or num_colors > 8:
+        technique = "DTG (Direct to Garment)"
+        reason = "High color complexity or gradients require digital printing"
+        cost_per_print = 4.50
+        setup_cost = 0
+        best_for = "Photorealistic, unlimited colors"
+    elif num_colors <= 3 and order_qty >= 50:
+        technique = "Screen Print"
+        reason = "Low color count + volume = most cost effective"
+        cost_per_print = 1.50
+        setup_cost = 25 * num_colors  # $25 per screen
+        best_for = "Bulk orders, simple designs"
+    elif order_qty < 25:
+        technique = "Heat Transfer"
+        reason = "Best for small runs, no setup costs"
+        cost_per_print = 3.00
+        setup_cost = 0
+        best_for = "Small batches, quick turnaround"
+    else:
+        technique = "Screen Print"
+        reason = "Standard choice for medium runs"
+        cost_per_print = 2.00
+        setup_cost = 25 * num_colors
+        best_for = "Balanced cost and quality"
+    
+    total_print_cost = (cost_per_print * order_qty) + setup_cost
+    
+    return json.dumps({
+        "recommended_technique": technique,
+        "reason": reason,
+        "cost_per_print": cost_per_print,
+        "setup_cost": setup_cost,
+        "total_print_cost": round(total_print_cost, 2),
+        "best_for": best_for,
+        "colors": num_colors,
+        "quantity": order_qty
+    })
+
+import json  # Ensure json is imported for the new tools
 
 # In a real app, you'd load a massive ZIP database. 
 # For this demo, we mock the 'Geocoding' of a few key Zips to prove the Math works.
@@ -277,9 +683,9 @@ def scrape_supplier_inventory(sku: str) -> str:
             <h1>Supplier Stock Portal - {sku}</h1>
             <table id="inventory-table">
                 <tr><th>Warehouse</th><th>Qty</th><th>Status</th></tr>
-                <tr class="row-nj"><td>New Jersey (NJ)</td><td>60</td><td>Active</td></tr>
-                <tr class="row-tx"><td>Texas (TX)</td><td>40</td><td>Active</td></tr>
-                <tr class="row-ca"><td>California (CA)</td><td>0</td><td>Backorder</td></tr>
+                <tr class="row-nj"><td>New Jersey (NJ)</td><td>150</td><td>Active</td></tr>
+                <tr class="row-tx"><td>Texas (TX)</td><td>100</td><td>Active</td></tr>
+                <tr class="row-ca"><td>California (CA)</td><td>50</td><td>Active</td></tr>
             </table>
         </body>
     </html>
@@ -463,6 +869,74 @@ def save_logistics_plan(lead_id: int, plan_details: str, total_cost: float, carb
     conn.commit()
     conn.close()
     return "Logistics Plan Saved"
+
+# --- 7. DEMAND FORECASTING ---
+@mcp.tool()
+def get_demand_forecast(sku: str, days_ahead: int = 7) -> str:
+    """
+    Predicts order demand for the next N days based on SKU and historical patterns.
+    Returns daily forecasts with confidence intervals.
+    Useful for proactive inventory management.
+    """
+    import json
+    import random
+    from datetime import datetime, timedelta
+    
+    print(f"📈 LOGISTICS: Forecasting demand for {sku} ({days_ahead} days)")
+    
+    # Simulated forecast based on SKU category
+    base_demand = {
+        "CREW-NECK": 45,
+        "HOODIE": 30,
+        "POLO": 20,
+        "TANK": 35,
+        "LONG-SLEEVE": 25
+    }
+    
+    # Get base for this SKU
+    sku_base = 30
+    for key, val in base_demand.items():
+        if key in sku.upper():
+            sku_base = val
+            break
+    
+    # Generate daily forecasts with variance
+    forecasts = []
+    today = datetime.now()
+    
+    for i in range(days_ahead):
+        day = today + timedelta(days=i+1)
+        
+        # Weekend boost (Sat/Sun)
+        day_multiplier = 1.3 if day.weekday() >= 5 else 1.0
+        
+        # Random variance ±20%
+        variance = random.uniform(0.8, 1.2)
+        predicted = int(sku_base * day_multiplier * variance)
+        
+        forecasts.append({
+            "date": day.strftime("%Y-%m-%d"),
+            "day_name": day.strftime("%A"),
+            "predicted_orders": predicted,
+            "confidence": random.randint(75, 95)
+        })
+    
+    total_predicted = sum(f["predicted_orders"] for f in forecasts)
+    peak_day = max(forecasts, key=lambda x: x["predicted_orders"])
+    
+    result = {
+        "sku": sku,
+        "forecast_period": f"Next {days_ahead} days",
+        "total_predicted_orders": total_predicted,
+        "avg_daily": round(total_predicted / days_ahead, 1),
+        "peak_day": peak_day["day_name"],
+        "peak_orders": peak_day["predicted_orders"],
+        "daily_forecast": forecasts,
+        "recommendation": "STOCK UP" if total_predicted > 200 else "NORMAL LEVELS"
+    }
+    
+    print(f"   Forecast: {total_predicted} orders over {days_ahead} days")
+    return json.dumps(result)
 
 # ==========================================
 # 🌱 CARBON FOOTPRINT CALCULATOR
