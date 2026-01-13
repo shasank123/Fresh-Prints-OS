@@ -449,7 +449,7 @@ async def customer_reject(token: str, feedback: str = "Customer requested change
     Public endpoint - Apparel Chair clicks this link to reject.
     """
     if token not in customer_approval_tokens:
-        return {"error": "Invalid or expired token"}
+        return {"error": "Invalid or expired token", "message": "This link has already been used or has expired."}
     
     token_data = customer_approval_tokens[token]
     lead_id = token_data["lead_id"]
@@ -469,14 +469,51 @@ async def customer_reject(token: str, feedback: str = "Customer requested change
     
     log_agent_step(lead_id, "SYSTEM", f"❌ Apparel Chair Rejected: {feedback}")
     
+    # Trigger designer agent to regenerate with feedback
+    import time
+    new_thread_id = f"{lead_id}_v{int(time.time())}"
+    lead_thread_map[lead_id] = new_thread_id
+    
+    log_agent_step(lead_id, "SYSTEM", "🔄 Regenerating Design based on Apparel Chair feedback...")
+    
+    import asyncio
+    def run_regeneration():
+        asyncio.run(run_designer_agent_with_feedback(lead_id, f"Apparel Chair feedback: {feedback}", new_thread_id))
+    
+    from threading import Thread
+    Thread(target=run_regeneration).start()
+    
     # Remove used token
     del customer_approval_tokens[token]
     
-    return {
-        "status": "rejected",
-        "message": f"Thank you for your feedback. The design team will revise based on your input.",
-        "lead_id": lead_id
-    }
+    # Return a nice HTML page
+    from fastapi.responses import HTMLResponse
+    html_content = f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Changes Requested - Fresh Prints</title>
+        <style>
+            body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%); color: white; display: flex; justify-content: center; align-items: center; min-height: 100vh; margin: 0; }}
+            .container {{ text-align: center; padding: 40px; background: rgba(255,255,255,0.1); border-radius: 20px; max-width: 500px; }}
+            h1 {{ color: #f59e0b; margin-bottom: 20px; }}
+            p {{ color: #94a3b8; line-height: 1.6; }}
+            .emoji {{ font-size: 64px; margin-bottom: 20px; }}
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <div class="emoji">📝</div>
+            <h1>Changes Requested</h1>
+            <p>Thank you, <strong>{token_data['customer_name']}</strong>!</p>
+            <p>Your feedback "<em>{feedback}</em>" has been sent to the design team.</p>
+            <p>They are now generating a <strong>new design</strong> based on your input.</p>
+            <p style="margin-top: 30px; font-size: 12px; color: #64748b;">You will receive a new email when the updated design is ready.</p>
+        </div>
+    </body>
+    </html>
+    """
+    return HTMLResponse(content=html_content)
 
 # 8. CHECK CUSTOMER APPROVAL STATUS
 @app.get("/customer-approval-status/{lead_id}")

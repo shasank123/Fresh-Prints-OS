@@ -466,7 +466,7 @@ export default function LogisticsPage() {
                 <div className="flex justify-between">
                   <span className="text-fp-slate">Status</span>
                   {(() => {
-                    const isFailed = (pendingPlan?.plan_details || approvedPlan?.plan_details || '').toLowerCase().includes('insufficient');
+                    const isFailed = (pendingPlan?.plan_details || approvedPlan?.plan_details || '').toLowerCase().startsWith('insufficient');
                     if (!activeLeadId) return <span className="font-mono text-xs px-2 py-0.5 rounded-full bg-gray-500/20 text-fp-slate">Ready</span>;
                     if (isFailed && isApproved) return <span className="font-mono text-xs px-2 py-0.5 rounded-full bg-red-500/20 text-red-400">❌ Failed - Insufficient Stock</span>;
                     if (pendingPlan) return <span className="font-mono text-xs px-2 py-0.5 rounded-full bg-yellow-500/20 text-yellow-400">⏸ Awaiting Approval</span>;
@@ -481,7 +481,7 @@ export default function LogisticsPage() {
           {/* Delivery Notification Preview - Show different message for failed orders */}
           {(pendingPlan || approvedPlan) && (() => {
             const planDetails = pendingPlan?.plan_details || approvedPlan?.plan_details || '';
-            const isFailed = planDetails.toLowerCase().includes('insufficient');
+            const isFailed = planDetails.toLowerCase().startsWith('insufficient');
 
             return (
               <div className={`bg-fp-lightNavy p-4 rounded-xl border ${isFailed ? 'border-red-500/50' : 'border-white/5'}`}>

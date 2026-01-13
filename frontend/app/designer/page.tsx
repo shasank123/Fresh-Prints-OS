@@ -61,6 +61,16 @@ export default function DesignerPage() {
   const [selectedColorIndex, setSelectedColorIndex] = useState<number | null>(null);
   const [showCopyToast, setShowCopyToast] = useState(false);
 
+  // State for Apparel Chair (Stage 2) approval - MUST be declared before useEffect that uses them
+  const [artDirectorApproved, setArtDirectorApproved] = useState(false);
+  const [customerEmail, setCustomerEmail] = useState("apparelchair@university.edu");
+  const [customerName, setCustomerName] = useState("Apparel Chair");
+  const [approvalToken, setApprovalToken] = useState<string | null>(null);
+  const [approvalUrl, setApprovalUrl] = useState<string | null>(null);
+  const [rejectUrl, setRejectUrl] = useState<string | null>(null);
+  const [customerApprovalStatus, setCustomerApprovalStatus] = useState<string | null>(null);
+  const [processedRejectionId, setProcessedRejectionId] = useState<number | null>(null);
+
   // Trigger the Designer Agent
   const triggerDesigner = async () => {
     if (!vibe.trim()) {
@@ -93,22 +103,85 @@ export default function DesignerPage() {
     }
   };
 
-  // Poll for pending design approval
+  // Poll for pending design approval AND check for final approval status
   useEffect(() => {
-    if (!activeLeadId || isApproved) return;
+    if (!activeLeadId) return;
 
     const checkPending = async () => {
       try {
-        const res = await axios.get(`http://localhost:8000/design-pending-review/${activeLeadId}`);
-        if (res.data.status === "waiting_for_approval") {
-          setPendingDesign(res.data);
-          // Add to history if new design
-          if (res.data.image_url && !designHistory.find(d => d.url === res.data.image_url)) {
-            setDesignHistory(prev => [...prev, {
-              url: res.data.image_url,
-              style: vibe,
-              timestamp: Date.now()
-            }]);
+        // Check for final Apparel Chair approval in logs
+        const logsRes = await axios.get(`http://localhost:8000/logs/${activeLeadId}`);
+        const logs = logsRes.data.logs || [];
+
+        // Find the MOST RECENT Apparel Chair action (approval or rejection)
+        // Logs are typically ordered oldest first, so reverse to get most recent
+        const reversedLogs = [...logs].reverse();
+
+        let mostRecentApproval = null;
+        let mostRecentRejection = null;
+
+        for (const log of reversedLogs) {
+          const msg = log.log_message || '';
+          if (!mostRecentApproval && msg.includes('Apparel Chair') && msg.includes('Approved!')) {
+            mostRecentApproval = log;
+          }
+          if (!mostRecentRejection && msg.includes('Apparel Chair') && msg.includes('Rejected:')) {
+            mostRecentRejection = log;
+          }
+          // Only need the most recent of each
+          if (mostRecentApproval && mostRecentRejection) break;
+        }
+
+        // Only consider approved if approval is MORE RECENT than rejection (or no rejection exists)
+        const shouldBeApproved = mostRecentApproval && (
+          !mostRecentRejection ||
+          (mostRecentApproval.id > mostRecentRejection.id) // Higher ID = more recent
+        );
+
+        if (shouldBeApproved && artDirectorApproved) {
+          console.log("Final approval detected (more recent than any rejection):", mostRecentApproval.log_message);
+          setCustomerApprovalStatus('APPROVED');
+          setIsApproved(true);
+          setPendingDesign(null);
+          return; // Stop polling
+        }
+
+        // Check if rejection is more recent than approval - reset state to allow new approval cycle
+        // Check if rejection is more recent than approval - reset state to allow new approval cycle
+        const shouldBeRejected = mostRecentRejection && (
+          !mostRecentApproval ||
+          (mostRecentRejection.id > mostRecentApproval.id) // Higher ID = more recent
+        );
+
+        // Only reset if this is a NEW rejection we haven't processed yet
+        const isNewRejection = shouldBeRejected && mostRecentRejection.id !== processedRejectionId;
+
+        // Reset state if rejection detected and we're in any Stage 2 state
+        if (isNewRejection && (artDirectorApproved || approvalToken || isApproved)) {
+          console.log("Rejection detected, resetting to Stage 1 for new design cycle");
+          setProcessedRejectionId(mostRecentRejection.id);
+          setIsApproved(false);
+          setArtDirectorApproved(false);
+          setCustomerApprovalStatus('REJECTED');
+          setApprovalToken(null);
+          setApprovalUrl(null);
+          setRejectUrl(null);
+          setApprovedDesign(null); // Clear the old approved design
+        }
+
+        // If not finally approved, check for pending design
+        if (!shouldBeApproved) {
+          const res = await axios.get(`http://localhost:8000/design-pending-review/${activeLeadId}`);
+          if (res.data.status === "waiting_for_approval") {
+            setPendingDesign(res.data);
+            // Add to history if new design
+            if (res.data.image_url && !designHistory.find(d => d.url === res.data.image_url)) {
+              setDesignHistory(prev => [...prev, {
+                url: res.data.image_url,
+                style: vibe,
+                timestamp: Date.now()
+              }]);
+            }
           }
         }
       } catch (e) {
@@ -118,15 +191,7 @@ export default function DesignerPage() {
 
     const interval = setInterval(checkPending, 3000);
     return () => clearInterval(interval);
-  }, [activeLeadId, isApproved, vibe, designHistory]);
-
-  // State for Apparel Chair (Stage 2) approval
-  const [artDirectorApproved, setArtDirectorApproved] = useState(false);
-  const [customerEmail, setCustomerEmail] = useState("apparelchair@university.edu");
-  const [customerName, setCustomerName] = useState("Apparel Chair");
-  const [approvalToken, setApprovalToken] = useState<string | null>(null);
-  const [approvalUrl, setApprovalUrl] = useState<string | null>(null);
-  const [customerApprovalStatus, setCustomerApprovalStatus] = useState<string | null>(null);
+  }, [activeLeadId, isApproved, artDirectorApproved, vibe, designHistory, processedRejectionId]);
 
   // Approve design (Stage 1 - Art Director)
   const handleApprove = async () => {
@@ -157,6 +222,7 @@ export default function DesignerPage() {
       console.log("Response:", res.data);
       setApprovalToken(res.data.token);
       setApprovalUrl(res.data.approval_url);
+      setRejectUrl(res.data.reject_url);
       setCustomerApprovalStatus("pending");
     } catch (e: any) {
       console.error("Error:", e);
@@ -164,48 +230,7 @@ export default function DesignerPage() {
     }
   };
 
-  // Poll for customer approval
-  useEffect(() => {
-    if (!activeLeadId || !approvalToken) return;
-
-    const checkCustomerStatus = async () => {
-      try {
-        // Check agent logs for Apparel Chair approval
-        const logsRes = await axios.get(`http://localhost:8000/logs/${activeLeadId}`);
-        const logs = logsRes.data.logs || [];
-
-        // Look for FINAL customer approval message in logs
-        // Must match "Apparel Chair...Approved!" with exclamation (not "Awaiting...approval")
-        const approvalLog = logs.find((l: any) =>
-          l.log_message?.includes('Apparel Chair') &&
-          l.log_message?.includes('Approved!') &&
-          l.log_message?.includes('Design Saved')
-        );
-
-        if (approvalLog) {
-          setCustomerApprovalStatus('APPROVED');
-          setIsApproved(true);
-          return;
-        }
-
-        // Also check rejection
-        const rejectionLog = logs.find((l: any) =>
-          l.log_message?.includes('Apparel Chair') && l.log_message?.includes('Rejected:')
-        );
-
-        if (rejectionLog) {
-          setCustomerApprovalStatus('REJECTED');
-          setArtDirectorApproved(false);
-          setApprovalToken(null);
-        }
-      } catch (e) {
-        console.error("Status check error", e);
-      }
-    };
-
-    const interval = setInterval(checkCustomerStatus, 3000);
-    return () => clearInterval(interval);
-  }, [activeLeadId, approvalToken]);
+  // Note: Main polling at line 105 handles approval/rejection detection with timestamp comparison
 
   // Reject design with feedback
   const handleReject = async () => {
@@ -413,7 +438,7 @@ export default function DesignerPage() {
           </div>
 
           {/* Approval Actions - Stage 1: Art Director */}
-          {pendingDesign?.status === "waiting_for_approval" && !artDirectorApproved && (
+          {pendingDesign?.status === "waiting_for_approval" && !artDirectorApproved && !isApproved && (
             <div className="flex gap-3">
               <button
                 onClick={() => setShowRejectModal(true)}
@@ -500,9 +525,18 @@ export default function DesignerPage() {
                     >
                       ✓ Approve Design
                     </a>
-                    <button className="px-4 py-2 bg-red-500 text-white rounded font-bold text-xs hover:bg-red-600">
+                    <a
+                      href={rejectUrl || "#"}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="px-4 py-2 bg-red-500 text-white rounded font-bold text-xs hover:bg-red-600"
+                      onClick={(e) => {
+                        e.preventDefault();
+                        window.open(rejectUrl || "", "_blank");
+                      }}
+                    >
                       ✕ Request Changes
-                    </button>
+                    </a>
                   </div>
                 </div>
               </div>
