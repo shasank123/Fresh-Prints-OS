@@ -88,25 +88,36 @@ async def run_logistics_agent(lead_id: int, customer_zip: str, order_qty: int, s
 
     return "Done"
 
-async def run_logistics_agent_with_feedback(lead_id: int, feedback: str, thread_id: str):
+async def run_logistics_agent_with_feedback(lead_id: int, feedback: str, thread_id: str, context: dict = None):
     """Runs the logistics agent with rejection feedback for regeneration."""
     config = {"configurable": {"thread_id": thread_id}}
     
     log_agent_step(lead_id, "SYSTEM", f"🔄 Regenerating Plan with Feedback...")
+    
+    # Get order context
+    sku = context.get("sku", "UNKNOWN") if context else "UNKNOWN"
+    order_qty = context.get("order_qty", 0) if context else 0
+    customer_zip = context.get("customer_zip", "UNKNOWN") if context else "UNKNOWN"
 
     query = f"""
     You are a Supply Chain Commander. The previous logistics plan was REJECTED.
     
+    ORIGINAL ORDER DETAILS:
+    - SKU: {sku}
+    - Quantity: {order_qty} units
+    - Customer ZIP: {customer_zip}
+    
     FEEDBACK FROM HUMAN: "{feedback}"
     
-    Please reconsider the logistics strategy based on this feedback.
+    The human has overridden the previous decision. Based on their feedback, proceed accordingly.
     
-    RECALCULATE:
-    1. STOCK: Call `scrape_supplier_inventory` again if needed.
-    2. RISK: Re-check `check_weather_risk` if weather was a concern.
-    3. CAPACITY: Re-check `check_factory_load` if capacity was mentioned.
-    4. OPTIMIZE: Call `optimize_split_shipment` with adjusted parameters.
-    5. FINAL: Call `save_logistics_plan` with your improved decision.
+    If they say "approve for now" or similar, save a plan that acknowledges the stock issue but proceeds with available stock.
+    If they request changes, recalculate as needed.
+    
+    FINAL STEP (REQUIRED): Call `save_logistics_plan` with your decision.
+    - plan_details: Include what stock is available and the human's feedback
+    - total_cost: Estimated cost (or 0.0)
+    - carbon_kg: Estimated carbon (or 0.0)
     """
     
     async for event in agent_executor.astream(

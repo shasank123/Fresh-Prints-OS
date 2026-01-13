@@ -503,12 +503,25 @@ class LogisticsPayload(BaseModel):
     order_qty: int
     sku: str
 
+# Track active thread per logistics lead (for rejection flow)
+logistics_thread_map: dict[int, str] = {}
+
+# Store original order context for rejection flow
+logistics_order_context: dict[int, dict] = {}
+
 @app.post("/run-logistics")
 async def trigger_logistics(payload: LogisticsPayload, background_tasks: BackgroundTasks):
     import asyncio
     
     # Track thread for this lead (initial run uses lead_id as thread)
     logistics_thread_map[payload.lead_id] = str(payload.lead_id)
+    
+    # Store order context for rejection flow
+    logistics_order_context[payload.lead_id] = {
+        "customer_zip": payload.customer_zip,
+        "order_qty": payload.order_qty,
+        "sku": payload.sku
+    }
     
     def run_async_agent(lead_id, customer_zip, order_qty, sku):
         """Wrapper to run async agent in background thread"""
@@ -522,9 +535,6 @@ async def trigger_logistics(payload: LogisticsPayload, background_tasks: Backgro
         payload.sku
     )
     return {"status": "Logistics Agent Started"}
-
-# Track active thread per logistics lead (for rejection flow)
-logistics_thread_map: dict[int, str] = {}
 
 # 2. REVIEW PENDING PLAN (The HITL Modal)
 @app.get("/logistics-pending-plan/{lead_id}")
@@ -588,27 +598,10 @@ async def get_logistics_plan(lead_id: int):
 # 3. APPROVE PLAN
 @app.post("/approve-logistics/{lead_id}")
 async def approve_logistics(lead_id: int):
-    import sqlite3
-    
     print(f"✅ Logistics Plan Approved for {lead_id}")
     # Use tracked thread for consistency
     thread_id = logistics_thread_map.get(lead_id, str(lead_id))
     config = {"configurable": {"thread_id": thread_id}}
-    
-    # Check THIS lead's logs for failure (not state which may have old messages)
-    is_failed = False
-    try:
-        conn = sqlite3.connect("fresh_prints.db")
-        cursor = conn.cursor()
-        cursor.execute(
-            "SELECT log_message FROM agent_logs WHERE lead_id = ? AND log_message LIKE '%insufficient%'",
-            (lead_id,)
-        )
-        if cursor.fetchone():
-            is_failed = True
-        conn.close()
-    except Exception as e:
-        print(f"Log check error: {e}")
     
     async for event in logistics_executor.astream(None, config=config):
         for node, values in event.items():
@@ -617,11 +610,8 @@ async def approve_logistics(lead_id: int):
                 if last_msg.type == "tool":
                      log_agent_step(lead_id, "TOOL_RESULT", f"Output: {last_msg.content}")
 
-    # Log appropriate message based on outcome
-    if is_failed:
-        log_agent_step(lead_id, "SYSTEM", "❌ Order Failed - Insufficient Stock. Customer notified.")
-    else:
-        log_agent_step(lead_id, "SYSTEM", "✅ Order Routed & Saved.")
+    # User explicitly approved, so log success
+    log_agent_step(lead_id, "SYSTEM", "✅ Order Routed & Saved.")
     return {"status": "Plan Executed"}
 
 # 4. REJECT PLAN (Feedback Loop)
@@ -636,6 +626,9 @@ async def reject_logistics(lead_id: int, payload: LogisticsRejectionPayload, bac
     import asyncio
     import time
     
+    # Get original order context
+    order_context = logistics_order_context.get(lead_id, {})
+    
     # Generate new thread ID for this rejection attempt
     new_thread_id = f"{lead_id}_logistics_v{int(time.time())}"
     logistics_thread_map[lead_id] = new_thread_id
@@ -643,11 +636,11 @@ async def reject_logistics(lead_id: int, payload: LogisticsRejectionPayload, bac
     print(f"❌ Logistics Plan Rejected for {lead_id}: {payload.feedback} -> New Thread: {new_thread_id}")
     log_agent_step(lead_id, "SYSTEM", f"❌ Plan Rejected. Feedback: {payload.feedback}")
     
-    def run_async_agent_with_feedback(lead_id, feedback, thread_id):
+    def run_async_agent_with_feedback(lead_id, feedback, thread_id, context):
         """Wrapper to run async agent with feedback in background thread"""
-        asyncio.run(run_logistics_agent_with_feedback(lead_id, feedback, thread_id))
+        asyncio.run(run_logistics_agent_with_feedback(lead_id, feedback, thread_id, context))
     
-    background_tasks.add_task(run_async_agent_with_feedback, lead_id, payload.feedback, new_thread_id)
+    background_tasks.add_task(run_async_agent_with_feedback, lead_id, payload.feedback, new_thread_id, order_context)
     
     return {"status": "Feedback sent to Agent. Regenerating plan..."}
 
