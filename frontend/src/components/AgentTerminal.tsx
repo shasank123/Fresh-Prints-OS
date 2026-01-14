@@ -147,7 +147,19 @@ export default function AgentTerminal({ leadId }: { leadId: number | null }) {
                 {/* Only show Thinking if agent is still active (not finished, failed, or paused) */}
                 {logs.length > 0 && (() => {
                     const lastLog = logs[logs.length - 1];
-                    const isFinished = lastLog.log_message.includes('✅') || lastLog.log_message.includes('❌') || lastLog.log_message.includes('PAUSED');
+                    const msg = lastLog.log_message;
+                    // Check for various completion conditions
+                    const isFinished =
+                        msg.includes('✅') ||
+                        msg.includes('❌') ||
+                        msg.includes('PAUSED') ||
+                        msg.includes('📧') ||
+                        msg.includes('Logistics Plan Saved') ||
+                        msg.includes('Order Routed') ||
+                        msg.includes('Notification sent') ||
+                        msg.includes('Stock Shortage') ||
+                        msg.includes('Plan Executed') ||
+                        msg.includes('completed');
                     return !isFinished && (
                         <div className="flex items-center gap-2 text-fp-gold animate-pulse mt-4 p-2 bg-fp-gold/10 rounded">
                             <Loader2 size={14} className="animate-spin" />

@@ -581,6 +581,16 @@ async def get_logistics_plan(lead_id: int):
     config = {"configurable": {"thread_id": thread_id}}
     state = logistics_executor.get_state(config)
     
+    # Check if save_logistics_plan was already executed by scanning message history
+    # This prevents the infinite "thinking" loop after approval
+    if state.values and "messages" in state.values:
+        for msg in state.values["messages"]:
+            if hasattr(msg, 'type') and msg.type == 'tool':
+                content = str(msg.content) if hasattr(msg, 'content') else ''
+                if 'Logistics Plan Saved' in content:
+                    # Plan was already saved, agent should stop
+                    return {"status": "completed"}
+    
     if state.next:
         last_message = state.values["messages"][-1]
         
@@ -640,6 +650,33 @@ async def approve_logistics(lead_id: int):
     thread_id = logistics_thread_map.get(lead_id, str(lead_id))
     config = {"configurable": {"thread_id": thread_id}}
     
+    # Check if this is an insufficient stock case before resuming
+    state = logistics_executor.get_state(config)
+    is_insufficient_stock = False
+    
+    if state.next:
+        last_message = state.values["messages"][-1]
+        tool_calls = []
+        if hasattr(last_message, 'tool_calls') and last_message.tool_calls:
+            tool_calls = last_message.tool_calls
+        elif hasattr(last_message, 'additional_kwargs') and "tool_calls" in last_message.additional_kwargs:
+            tool_calls = last_message.additional_kwargs['tool_calls']
+        
+        if tool_calls:
+            first_call = tool_calls[0]
+            if isinstance(first_call, dict):
+                raw_args = first_call.get('function', {}).get('arguments') or json.dumps(first_call.get('args', {}))
+            else:
+                raw_args = json.dumps(getattr(first_call, 'args', {}))
+            
+            try:
+                args = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
+                plan_details = args.get('plan_details', '').lower()
+                if 'insufficient' in plan_details:
+                    is_insufficient_stock = True
+            except:
+                pass
+    
     async for event in logistics_executor.astream(None, config=config):
         for node, values in event.items():
             if "messages" in values:
@@ -647,9 +684,14 @@ async def approve_logistics(lead_id: int):
                 if last_msg.type == "tool":
                      log_agent_step(lead_id, "TOOL_RESULT", f"Output: {last_msg.content}")
 
-    # User explicitly approved, so log success
-    log_agent_step(lead_id, "SYSTEM", "✅ Order Routed & Saved.")
-    return {"status": "Plan Executed"}
+    # Log appropriate message based on stock status
+    if is_insufficient_stock:
+        log_agent_step(lead_id, "SYSTEM", "📧 Stock Shortage Notification sent to Apparel Chair.")
+        return {"status": "Stock Shortage Notification Sent"}
+    else:
+        log_agent_step(lead_id, "SYSTEM", "✅ Order Routed & Saved.")
+        return {"status": "Plan Executed"}
+
 
 # 4. REJECT PLAN (Feedback Loop)
 class LogisticsRejectionPayload(BaseModel):

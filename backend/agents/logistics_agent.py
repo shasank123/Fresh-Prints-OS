@@ -67,7 +67,10 @@ async def run_logistics_agent(lead_id: int, customer_zip: str, order_qty: int, s
        - total_cost: sum of shipping costs (or 0.0 if failed)
        - carbon_kg: environmental impact (or 0.0 if failed)
     
-    CRITICAL: Never stop without saving a plan. Always complete step 7.
+    CRITICAL: 
+    - Never stop without saving a plan. Always complete step 7.
+    - After calling `save_logistics_plan`, you are DONE. Do NOT call any more tools.
+    - `save_logistics_plan` is your FINAL action. Stop immediately after calling it.
     """
     
     async for event in agent_executor.astream(

@@ -466,7 +466,9 @@ export default function LogisticsPage() {
                 <div className="flex justify-between">
                   <span className="text-fp-slate">Status</span>
                   {(() => {
-                    const isFailed = (pendingPlan?.plan_details || approvedPlan?.plan_details || '').toLowerCase().startsWith('insufficient');
+                    // Only mark as failed if plan explicitly starts with INSUFFICIENT STOCK (not just contains the word)
+                    const planText = (pendingPlan?.plan_details || approvedPlan?.plan_details || '').toUpperCase();
+                    const isFailed = planText.startsWith('INSUFFICIENT STOCK') || planText.startsWith('CRITICAL: INSUFFICIENT');
                     if (!activeLeadId) return <span className="font-mono text-xs px-2 py-0.5 rounded-full bg-gray-500/20 text-fp-slate">Ready</span>;
                     if (isFailed && isApproved) return <span className="font-mono text-xs px-2 py-0.5 rounded-full bg-red-500/20 text-red-400">❌ Failed - Insufficient Stock</span>;
                     if (pendingPlan) return <span className="font-mono text-xs px-2 py-0.5 rounded-full bg-yellow-500/20 text-yellow-400">⏸ Awaiting Approval</span>;
@@ -481,7 +483,9 @@ export default function LogisticsPage() {
           {/* Delivery Notification Preview - Show different message for failed orders */}
           {(pendingPlan || approvedPlan) && (() => {
             const planDetails = pendingPlan?.plan_details || approvedPlan?.plan_details || '';
-            const isFailed = planDetails.toLowerCase().startsWith('insufficient');
+            // Only mark as failed if plan explicitly starts with INSUFFICIENT STOCK (not just contains the word)
+            const planText = planDetails.toUpperCase();
+            const isFailed = planText.startsWith('INSUFFICIENT STOCK') || planText.startsWith('CRITICAL: INSUFFICIENT');
 
             return (
               <div className={`bg-fp-lightNavy p-4 rounded-xl border ${isFailed ? 'border-red-500/50' : 'border-white/5'}`}>
